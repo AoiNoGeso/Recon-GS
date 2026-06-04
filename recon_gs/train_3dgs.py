@@ -151,7 +151,7 @@ def train_3dgs(colmap_dir: Path, frames_dir: Path, masks_dir: Path, output_ply: 
             quats=quats / quats.norm(dim=-1, keepdim=True),
             scales=torch.exp(scales),
             opacities=torch.sigmoid(opacities),
-            colors=sh_coeffs[:, 0, :],  # degree-0 SH = plain RGB
+            colors=sh_coeffs,  # (N, 1, 3) — sh_degree=0 requires 3D tensor
             viewmats=viewmat,
             Ks=K[None],
             width=W,
