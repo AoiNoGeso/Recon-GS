@@ -123,7 +123,7 @@ def train_3dgs(colmap_dir: Path, frames_dir: Path, masks_dir: Path, output_ply: 
         sparse_dir, device
     )
 
-    strategy = DefaultStrategy(verbose=True)
+    strategy = DefaultStrategy(verbose=True, absgrad=True)
     state = strategy.initialize_state()
 
     # DefaultStrategy は params を dict[str, Tensor] として期待する
@@ -164,6 +164,7 @@ def train_3dgs(colmap_dir: Path, frames_dir: Path, masks_dir: Path, output_ply: 
             width=W,
             height=H,
             sh_degree=0,
+            absgrad=True,
         )
 
         rendered = renders[0]  # (H, W, 3)
