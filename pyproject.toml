@@ -33,3 +33,9 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["recon_gs"]
+
+[tool.uv]
+# GroundingDINO の setup.py がビルド時に torch を要求するため、
+# uv のビルド隔離を無効にして venv 内の torch を参照させる。
+# 必ず `uv pip install torch torchvision` を先に実行すること。
+no-build-isolation-package = ["groundingdino"]

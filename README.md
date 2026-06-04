@@ -15,14 +15,15 @@
 # uv のインストール（未インストールの場合）
 curl -LsSf https://astral.sh/uv/install.sh | sh
 
-# 依存関係のインストール
-uv sync
+# Step 1: torch を先にインストール（GroundingDINO のビルドに必要）
+uv pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+
+# Step 2: 残りの依存関係をインストール
+uv sync --python 3.12
 ```
 
-> **Note**: `torch` は CUDA 対応版を別途インストールしてください。
-> ```bash
-> uv pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
-> ```
+> **Note**: GroundingDINO の `setup.py` はビルド時に torch を参照します。
+> `uv sync` より前に torch を入れておく必要があります。
 
 ## 使い方
 
