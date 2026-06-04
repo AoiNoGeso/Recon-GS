@@ -24,7 +24,7 @@ def run_sfm(frames_dir: Path, masks_dir: Path, colmap_dir: Path) -> pycolmap.Rec
         image_path=frames_dir,
         camera_mode=pycolmap.CameraMode.SINGLE,
         extraction_options=pycolmap.FeatureExtractionOptions(),
-        device=pycolmap.Device.cuda,
+        device=pycolmap.Device.cpu,
     )
 
     # ------------------------------------------------------------------ #
@@ -33,7 +33,7 @@ def run_sfm(frames_dir: Path, masks_dir: Path, colmap_dir: Path) -> pycolmap.Rec
     print("  [sfm] Exhaustive matching...")
     pycolmap.match_exhaustive(
         database_path=db_path,
-        device=pycolmap.Device.cuda,
+        device=pycolmap.Device.cpu,
     )
 
     # ------------------------------------------------------------------ #
