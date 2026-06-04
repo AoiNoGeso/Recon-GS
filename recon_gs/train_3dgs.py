@@ -55,10 +55,9 @@ def _load_colmap_cameras(
         ).to(device)
         K_list.append(K)
 
-        # RGB image — sRGB (gamma-corrected) → linear light space
+        # RGB image
         img_path = frames_dir / img.name
         rgb = np.array(Image.open(img_path).convert("RGB"), dtype=np.float32) / 255.0
-        rgb = rgb ** 2.2  # approximate sRGB gamma removal
         image_list.append(torch.tensor(rgb).to(device))
 
         # Mask (1 = dynamic / ignored, 0 = static / used)
