@@ -16,8 +16,7 @@ dependencies = [
     "opencv-python>=4.9.0",
     # SfM
     "pycolmap>=3.8.0",
-    "lightglue",
-    "hloc @ git+https://github.com/cvg/Hierarchical-Localization.git",
+    "hloc @ git+https://github.com/cvg/Hierarchical-Localization.git@master",
     # 3DGS
     "gsplat>=1.4.0",
     # CLI
@@ -53,8 +52,6 @@ torch = [
 torchvision = [
     { index = "pytorch-cu121", marker = "sys_platform == 'linux'" },
 ]
-# hloc が要求する古いコミット (eb42fee2) はビルドが壊れているため最新 main を使用
-lightglue = { git = "https://github.com/cvg/LightGlue.git" }
 
 [[tool.uv.index]]
 name = "pytorch-cu121"
