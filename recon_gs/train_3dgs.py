@@ -37,17 +37,17 @@ def _load_colmap_cameras(
         img = model.images[image_id]
         cam = model.cameras[img.camera_id]
 
-        # World-to-camera rotation + translation
-        R = torch.tensor(img.rotation_matrix(), dtype=torch.float32)
-        t = torch.tensor(img.tvec, dtype=torch.float32)
+        # World-to-camera rotation + translation (pycolmap >= 3.x API)
+        R = torch.tensor(img.cam_from_world.rotation.matrix(), dtype=torch.float32)
+        t = torch.tensor(img.cam_from_world.translation, dtype=torch.float32)
         w2c = torch.eye(4)
         w2c[:3, :3] = R
         w2c[:3, 3] = t
         c2w = torch.linalg.inv(w2c)
         c2w_list.append(c2w.to(device))
 
-        # Intrinsics (assume SIMPLE_PINHOLE or PINHOLE)
-        fx = cam.focal_length_x
+        # Intrinsics
+        fx = cam.focal_length_x if hasattr(cam, "focal_length_x") else cam.focal_length
         fy = cam.focal_length_y if hasattr(cam, "focal_length_y") else fx
         cx, cy = cam.principal_point_x, cam.principal_point_y
         K = torch.tensor(
