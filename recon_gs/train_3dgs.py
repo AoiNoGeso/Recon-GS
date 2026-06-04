@@ -161,6 +161,10 @@ def train_3dgs(colmap_dir: Path, frames_dir: Path, masks_dir: Path, output_ply: 
 
         rendered = renders[0]  # (H, W, 3)
 
+        # DefaultStrategy が means2d の勾配を参照するため retain_grad() が必要
+        if "means2d" in info and info["means2d"] is not None:
+            info["means2d"].retain_grad()
+
         # Mask out dynamic regions before computing loss
         valid = (1.0 - mask).unsqueeze(-1)  # (H, W, 1)
         loss = torch.abs(rendered * valid - gt * valid).mean()
