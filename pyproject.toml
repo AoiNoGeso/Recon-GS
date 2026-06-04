@@ -8,8 +8,8 @@ dependencies = [
     # Dynamic masking
     "torch>=2.1.0",
     "torchvision>=0.16.0",
-    # GroundingDINO: install from source to avoid supervision version conflict
-    "groundingdino @ git+https://github.com/IDEA-Research/GroundingDINO.git",
+    # Dynamic masking: HuggingFace版GroundingDINO + SAM2 (CUDAコンパイル不要)
+    "transformers>=4.38.0",
     "sam-2 @ git+https://github.com/facebookresearch/sam2.git",
     "Pillow>=10.0.0",
     "numpy>=1.26.0",
@@ -39,7 +39,7 @@ packages = ["recon_gs"]
 [tool.uv]
 # GroundingDINO / SAM2 の setup.py がビルド時に torch を要求するため
 # uv のビルド隔離を無効にして venv 内の torch を参照させる
-no-build-isolation-package = ["groundingdino", "sam-2"]
+no-build-isolation-package = ["sam-2"]
 
 [tool.uv.sources]
 # torch / torchvision は PyTorch 公式インデックス (CUDA 12.1) から取得
