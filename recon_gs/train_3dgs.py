@@ -126,7 +126,14 @@ def train_3dgs(colmap_dir: Path, frames_dir: Path, masks_dir: Path, output_ply: 
     strategy = DefaultStrategy(verbose=True)
     state = strategy.initialize_state()
 
-    params = [means, scales, quats, opacities, sh_coeffs]
+    # DefaultStrategy は params を dict[str, Tensor] として期待する
+    params = {
+        "means": means,
+        "scales": scales,
+        "quats": quats,
+        "opacities": opacities,
+        "sh_coeffs": sh_coeffs,
+    }
     optimizer = torch.optim.Adam(
         [
             {"params": [means], "lr": 1.6e-4, "name": "means"},
@@ -147,11 +154,11 @@ def train_3dgs(colmap_dir: Path, frames_dir: Path, masks_dir: Path, output_ply: 
         viewmat = torch.linalg.inv(c2w)[None]  # (1, 4, 4)
 
         renders, alphas, info = rasterization(
-            means=means,
-            quats=quats / quats.norm(dim=-1, keepdim=True),
-            scales=torch.exp(scales),
-            opacities=torch.sigmoid(opacities),
-            colors=sh_coeffs,  # (N, 1, 3) — sh_degree=0 requires 3D tensor
+            means=params["means"],
+            quats=params["quats"] / params["quats"].norm(dim=-1, keepdim=True),
+            scales=torch.exp(params["scales"]),
+            opacities=torch.sigmoid(params["opacities"]),
+            colors=params["sh_coeffs"],  # (N, 1, 3) — sh_degree=0 requires 3D tensor
             viewmats=viewmat,
             Ks=K[None],
             width=W,
@@ -180,15 +187,15 @@ def train_3dgs(colmap_dir: Path, frames_dir: Path, masks_dir: Path, output_ply: 
         )
 
         if step % 1000 == 0:
-            print(f"  [{step}/{TRAIN_ITERATIONS}] loss={loss.item():.4f}  gaussians={len(means)}")
+            print(f"  [{step}/{TRAIN_ITERATIONS}] loss={loss.item():.4f}  gaussians={len(params['means'])}")
 
     _export_ply(
         output_ply,
-        means.detach().cpu().numpy(),
-        torch.exp(scales).detach().cpu().numpy(),
-        (quats / quats.norm(dim=-1, keepdim=True)).detach().cpu().numpy(),
-        torch.sigmoid(opacities).detach().cpu().numpy(),
-        sh_coeffs[:, 0, :].detach().cpu().numpy(),
+        params["means"].detach().cpu().numpy(),
+        torch.exp(params["scales"]).detach().cpu().numpy(),
+        (params["quats"] / params["quats"].norm(dim=-1, keepdim=True)).detach().cpu().numpy(),
+        torch.sigmoid(params["opacities"]).detach().cpu().numpy(),
+        params["sh_coeffs"][:, 0, :].detach().cpu().numpy(),
     )
 
 
