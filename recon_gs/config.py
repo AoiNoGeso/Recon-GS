@@ -30,3 +30,13 @@ EXTRACT_FPS: int = 15
 
 # 3DGS training
 TRAIN_ITERATIONS: int = 30_000
+
+# Adaptive Density Control (ADC)
+DENSIFY_FROM_ITER: int = 500
+DENSIFY_UNTIL_ITER: int = 15_000
+DENSIFICATION_INTERVAL: int = 100
+OPACITY_RESET_INTERVAL: int = 3_000
+DENSIFY_GRAD_THRESHOLD: float = 0.0002
+PERCENT_DENSE: float = 0.01      # scale ratio threshold: clone vs split
+MIN_OPACITY: float = 0.005       # prune gaussians below this opacity
+MAX_GAUSSIANS: int = 300_000     # safety cap
