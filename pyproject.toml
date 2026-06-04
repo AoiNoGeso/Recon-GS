@@ -34,7 +34,7 @@ build-backend = "hatchling.build"
 allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
-packages = ["recon_gs"]
+packages = ["src/recon_gs"]
 
 [tool.uv]
 # GroundingDINO / SAM2 の setup.py がビルド時に torch を要求するため
