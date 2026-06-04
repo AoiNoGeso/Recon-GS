@@ -1,4 +1,10 @@
-"""Step 2: Mask dynamic objects using Grounded-SAM2."""
+"""
+Step 2: Mask dynamic objects using HuggingFace GroundingDINO + SAM2.
+
+Uses:
+  - transformers.AutoModelForZeroShotObjectDetection  (GroundingDINO, no CUDA compilation)
+  - sam2.SAM2ImagePredictor                           (SAM2)
+"""
 
 from pathlib import Path
 
@@ -13,49 +19,54 @@ from recon_gs.config import (
     MASK_PROMPTS,
 )
 
-# GroundingDINO model weights (downloaded on first use via supervision)
 _GDINO_MODEL_ID = "IDEA-Research/grounding-dino-tiny"
 _SAM2_MODEL_ID = "facebook/sam2-hiera-large"
 
 
 def _load_models(device: torch.device):
-    from groundingdino.util.inference import load_model_from_hub
-    from sam2.build_sam import build_sam2
+    from transformers import AutoModelForZeroShotObjectDetection, AutoProcessor
+    from sam2.build_sam import build_sam2_hf
     from sam2.sam2_image_predictor import SAM2ImagePredictor
 
-    gdino = load_model_from_hub(_GDINO_MODEL_ID)
-    gdino.to(device).eval()
+    gdino_processor = AutoProcessor.from_pretrained(_GDINO_MODEL_ID)
+    gdino_model = AutoModelForZeroShotObjectDetection.from_pretrained(_GDINO_MODEL_ID).to(device)
+    gdino_model.eval()
 
-    sam2 = build_sam2(_SAM2_MODEL_ID, device=device)
-    predictor = SAM2ImagePredictor(sam2)
+    sam2_model = build_sam2_hf(_SAM2_MODEL_ID, device=device)
+    sam2_predictor = SAM2ImagePredictor(sam2_model)
 
-    return gdino, predictor
+    return gdino_processor, gdino_model, sam2_predictor
 
 
-def _detect_boxes(gdino, image_path: Path, prompt: str, device: torch.device):
-    from groundingdino.util.inference import load_image, predict
+def _detect_boxes(
+    processor,
+    model,
+    image_pil: Image.Image,
+    prompt: str,
+    device: torch.device,
+) -> np.ndarray:
+    """
+    Run GroundingDINO and return detected boxes as [x1, y1, x2, y2] pixel coords.
+    """
+    inputs = processor(
+        images=image_pil,
+        text=prompt,
+        return_tensors="pt",
+    ).to(device)
 
-    _, image_tensor = load_image(str(image_path))
-    boxes, logits, _ = predict(
-        model=gdino,
-        image=image_tensor.to(device),
-        caption=prompt,
+    with torch.no_grad():
+        outputs = model(**inputs)
+
+    results = processor.post_process_grounded_object_detection(
+        outputs,
+        inputs["input_ids"],
         box_threshold=GROUNDING_DINO_BOX_THRESHOLD,
         text_threshold=GROUNDING_DINO_TEXT_THRESHOLD,
-    )
-    return boxes, logits
+        target_sizes=[image_pil.size[::-1]],  # (H, W)
+    )[0]
 
-
-def _boxes_to_pixel(boxes, w: int, h: int) -> np.ndarray:
-    """Convert normalised [cx, cy, bw, bh] to [x1, y1, x2, y2] pixel coords."""
-    if len(boxes) == 0:
-        return np.empty((0, 4), dtype=np.float32)
-    cx, cy, bw, bh = boxes[:, 0], boxes[:, 1], boxes[:, 2], boxes[:, 3]
-    x1 = (cx - bw / 2) * w
-    y1 = (cy - bh / 2) * h
-    x2 = (cx + bw / 2) * w
-    y2 = (cy + bh / 2) * h
-    return np.stack([x1, y1, x2, y2], axis=1).astype(np.float32)
+    boxes = results["boxes"].cpu().numpy()  # (N, 4) xyxy pixel coords
+    return boxes
 
 
 def mask_frames(frames_dir: Path, masks_dir: Path) -> None:
@@ -65,30 +76,31 @@ def mask_frames(frames_dir: Path, masks_dir: Path) -> None:
     """
     masks_dir.mkdir(parents=True, exist_ok=True)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    gdino, sam2_predictor = _load_models(device)
 
-    # Join prompts into single GroundingDINO caption
-    caption = " . ".join(MASK_PROMPTS) + " ."
+    gdino_processor, gdino_model, sam2_predictor = _load_models(device)
+
+    # GroundingDINO expects a period-separated prompt string
+    prompt = " . ".join(MASK_PROMPTS) + " ."
 
     frame_paths = sorted(frames_dir.glob("*.png"))
     for frame_path in frame_paths:
         mask_path = masks_dir / frame_path.name
 
-        image_np = np.array(Image.open(frame_path).convert("RGB"))
+        image_pil = Image.open(frame_path).convert("RGB")
+        image_np = np.array(image_pil)
         h, w = image_np.shape[:2]
 
-        boxes, _ = _detect_boxes(gdino, frame_path, caption, device)
-        pixel_boxes = _boxes_to_pixel(boxes.cpu().numpy(), w, h)
+        boxes = _detect_boxes(gdino_processor, gdino_model, image_pil, prompt, device)
 
         combined_mask = np.zeros((h, w), dtype=np.uint8)
 
-        if len(pixel_boxes) > 0:
+        if len(boxes) > 0:
             sam2_predictor.set_image(image_np)
             sam_masks, _, _ = sam2_predictor.predict(
-                box=pixel_boxes,
+                box=boxes,
                 multimask_output=False,
             )
-            # sam_masks shape: (N, 1, H, W) or (N, H, W)
+            # sam_masks: (N, 1, H, W) or (N, H, W)
             if sam_masks.ndim == 4:
                 sam_masks = sam_masks[:, 0]
             for m in sam_masks:
