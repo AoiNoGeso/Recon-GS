@@ -40,7 +40,7 @@ packages = ["recon_gs"]
 [tool.uv]
 # GroundingDINO / SAM2 の setup.py がビルド時に torch を要求するため
 # uv のビルド隔離を無効にして venv 内の torch を参照させる
-no-build-isolation-package = ["groundingdino", "sam-2"]
+no-build-isolation-package = ["groundingdino", "sam-2", "lightglue"]
 
 [tool.uv.sources]
 # torch / torchvision は PyTorch 公式インデックス (CUDA 12.1) から取得
