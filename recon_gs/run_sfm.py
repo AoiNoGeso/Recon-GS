@@ -41,7 +41,6 @@ def run_sfm(frames_dir: Path, masks_dir: Path, colmap_dir: Path) -> pycolmap.Rec
         camera_mode=pycolmap.CameraMode.SINGLE,
         sift_options=pycolmap.SiftExtractionOptions(
             max_num_features=8192,
-            use_gpu=True,
         ),
         camera_options=pycolmap.CameraOptions(
             camera_model="SIMPLE_RADIAL",
@@ -54,7 +53,6 @@ def run_sfm(frames_dir: Path, masks_dir: Path, colmap_dir: Path) -> pycolmap.Rec
     print("  [sfm] Exhaustive matching...")
     pycolmap.match_exhaustive(
         database_path=db_path,
-        sift_options=pycolmap.SiftMatchingOptions(use_gpu=True),
     )
 
     # ------------------------------------------------------------------ #
