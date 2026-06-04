@@ -1,16 +1,16 @@
 [project]
 name = "recon-gs"
 version = "0.1.0"
-requires-python = ">=3.10"
+requires-python = ">=3.10,<3.13"
 dependencies = [
     # Frame extraction
     "ffmpeg-python>=0.2.0",
     # Dynamic masking
     "torch>=2.1.0",
     "torchvision>=0.16.0",
-    "groundingdino-py>=0.4.0",
+    # GroundingDINO: install from source to avoid supervision version conflict
+    "groundingdino @ git+https://github.com/IDEA-Research/GroundingDINO.git",
     "segment-anything-2>=1.0",
-    "supervision>=0.21.0",
     "Pillow>=10.0.0",
     "numpy>=1.26.0",
     "opencv-python>=4.9.0",
