@@ -38,8 +38,9 @@ def _load_colmap_cameras(
         cam = model.cameras[img.camera_id]
 
         # World-to-camera rotation + translation (pycolmap >= 3.x API)
-        R = torch.tensor(img.cam_from_world.rotation.matrix(), dtype=torch.float32)
-        t = torch.tensor(img.cam_from_world.translation, dtype=torch.float32)
+        cam_from_world = img.cam_from_world()
+        R = torch.tensor(cam_from_world.rotation.matrix(), dtype=torch.float32)
+        t = torch.tensor(cam_from_world.translation, dtype=torch.float32)
         w2c = torch.eye(4)
         w2c[:3, :3] = R
         w2c[:3, 3] = t
