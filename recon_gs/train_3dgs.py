@@ -8,7 +8,6 @@ from torch import Tensor
 
 import pycolmap
 from gsplat import rasterization
-from gsplat.strategy import DefaultStrategy
 
 from recon_gs.config import TRAIN_ITERATIONS
 
@@ -123,24 +122,13 @@ def train_3dgs(colmap_dir: Path, frames_dir: Path, masks_dir: Path, output_ply: 
         sparse_dir, device
     )
 
-    strategy = DefaultStrategy(verbose=True, absgrad=True)
-    state = strategy.initialize_state()
-
-    # DefaultStrategy は params を dict[str, Tensor] として期待する
-    params = {
-        "means": means,
-        "scales": scales,
-        "quats": quats,
-        "opacities": opacities,
-        "sh_coeffs": sh_coeffs,
-    }
     optimizer = torch.optim.Adam(
         [
-            {"params": [means], "lr": 1.6e-4, "name": "means"},
-            {"params": [scales], "lr": 5e-3, "name": "scales"},
-            {"params": [quats], "lr": 1e-3, "name": "quats"},
-            {"params": [opacities], "lr": 5e-2, "name": "opacities"},
-            {"params": [sh_coeffs], "lr": 2.5e-3, "name": "sh_coeffs"},
+            {"params": [means], "lr": 1.6e-4},
+            {"params": [scales], "lr": 5e-3},
+            {"params": [quats], "lr": 1e-3},
+            {"params": [opacities], "lr": 5e-2},
+            {"params": [sh_coeffs], "lr": 2.5e-3},
         ]
     )
 
@@ -149,54 +137,43 @@ def train_3dgs(colmap_dir: Path, frames_dir: Path, masks_dir: Path, output_ply: 
         c2w = c2w_list[idx]
         K = K_list[idx]
         gt = gt_images[idx]
-        mask = gt_masks[idx]  # 1 = dynamic (ignore), 0 = static (use)
+        mask = gt_masks[idx]
 
         viewmat = torch.linalg.inv(c2w)[None]  # (1, 4, 4)
+        quats_norm = quats / quats.norm(dim=-1, keepdim=True)
 
-        renders, alphas, info = rasterization(
-            means=params["means"],
-            quats=params["quats"] / params["quats"].norm(dim=-1, keepdim=True),
-            scales=torch.exp(params["scales"]),
-            opacities=torch.sigmoid(params["opacities"]),
-            colors=params["sh_coeffs"],  # (N, 1, 3) — sh_degree=0 requires 3D tensor
+        renders, alphas, _ = rasterization(
+            means=means,
+            quats=quats_norm,
+            scales=torch.exp(scales),
+            opacities=torch.sigmoid(opacities),
+            colors=sh_coeffs,
             viewmats=viewmat,
             Ks=K[None],
             width=W,
             height=H,
             sh_degree=0,
-            absgrad=True,
         )
 
         rendered = renders[0]  # (H, W, 3)
 
-        # Mask out dynamic regions before computing loss
-        valid = (1.0 - mask).unsqueeze(-1)  # (H, W, 1)
+        valid = (1.0 - mask).unsqueeze(-1)
         loss = torch.abs(rendered * valid - gt * valid).mean()
 
         optimizer.zero_grad()
-        # step_pre_backward は backward() より前に呼ぶ必要がある
-        # （内部で means2d.retain_grad() を実行するため）
-        strategy.step_pre_backward(
-            params=params, optimizers=[optimizer], state=state,
-            step=step, info=info,
-        )
         loss.backward()
         optimizer.step()
-        strategy.step_post_backward(
-            params=params, optimizers=[optimizer], state=state,
-            step=step, info=info, packed=False,
-        )
 
         if step % 1000 == 0:
-            print(f"  [{step}/{TRAIN_ITERATIONS}] loss={loss.item():.4f}  gaussians={len(params['means'])}")
+            print(f"  [{step}/{TRAIN_ITERATIONS}] loss={loss.item():.4f}  gaussians={len(means)}")
 
     _export_ply(
         output_ply,
-        params["means"].detach().cpu().numpy(),
-        torch.exp(params["scales"]).detach().cpu().numpy(),
-        (params["quats"] / params["quats"].norm(dim=-1, keepdim=True)).detach().cpu().numpy(),
-        torch.sigmoid(params["opacities"]).detach().cpu().numpy(),
-        params["sh_coeffs"][:, 0, :].detach().cpu().numpy(),
+        means.detach().cpu().numpy(),
+        torch.exp(scales).detach().cpu().numpy(),
+        (quats / quats.norm(dim=-1, keepdim=True)).detach().cpu().numpy(),
+        torch.sigmoid(opacities).detach().cpu().numpy(),
+        sh_coeffs[:, 0, :].detach().cpu().numpy(),
     )
 
 
