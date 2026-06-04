@@ -90,10 +90,14 @@ def _init_gaussians_from_sparse(sparse_dir: Path, device: torch.device):
     opacities = torch.full((n,), 0.1, device=device)
 
     # SH degree-0 colour from COLMAP point colours
+    # gsplat renders as: color = C0 * sh_dc + 0.5
+    # → 初期レンダリングが点群の色に一致するよう逆変換して初期化
+    C0 = 0.28209479177387814
     colors_raw = np.array(
         [p.color[:3] for p in model.points3D.values()], dtype=np.float32
     ) / 255.0
-    sh_coeffs = torch.tensor(colors_raw, device=device).unsqueeze(1)  # (N, 1, 3)
+    sh_dc_init = (colors_raw - 0.5) / C0  # 逆変換: rendered = C0 * sh_dc + 0.5
+    sh_coeffs = torch.tensor(sh_dc_init, device=device).unsqueeze(1)  # (N, 1, 3)
 
     return (
         means.requires_grad_(True),
