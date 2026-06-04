@@ -38,7 +38,20 @@ allow-direct-references = true
 packages = ["recon_gs"]
 
 [tool.uv]
-# GroundingDINO の setup.py がビルド時に torch を要求するため、
-# uv のビルド隔離を無効にして venv 内の torch を参照させる。
-# 必ず `uv pip install torch torchvision` を先に実行すること。
+# GroundingDINO / SAM2 の setup.py がビルド時に torch を要求するため
+# uv のビルド隔離を無効にして venv 内の torch を参照させる
 no-build-isolation-package = ["groundingdino", "sam-2"]
+
+[tool.uv.sources]
+# torch / torchvision は PyTorch 公式インデックス (CUDA 12.1) から取得
+torch = [
+    { index = "pytorch-cu121", marker = "sys_platform == 'linux'" },
+]
+torchvision = [
+    { index = "pytorch-cu121", marker = "sys_platform == 'linux'" },
+]
+
+[[tool.uv.index]]
+name = "pytorch-cu121"
+url = "https://download.pytorch.org/whl/cu121"
+explicit = true
