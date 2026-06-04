@@ -10,7 +10,7 @@ dependencies = [
     "torchvision>=0.16.0",
     # GroundingDINO: install from source to avoid supervision version conflict
     "groundingdino @ git+https://github.com/IDEA-Research/GroundingDINO.git",
-    "sam2 @ git+https://github.com/facebookresearch/sam2.git",
+    "sam-2 @ git+https://github.com/facebookresearch/sam2.git",
     "Pillow>=10.0.0",
     "numpy>=1.26.0",
     "opencv-python>=4.9.0",
@@ -38,4 +38,4 @@ packages = ["recon_gs"]
 # GroundingDINO の setup.py がビルド時に torch を要求するため、
 # uv のビルド隔離を無効にして venv 内の torch を参照させる。
 # 必ず `uv pip install torch torchvision` を先に実行すること。
-no-build-isolation-package = ["groundingdino", "sam2"]
+no-build-isolation-package = ["groundingdino", "sam-2"]
