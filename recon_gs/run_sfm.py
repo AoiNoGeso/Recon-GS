@@ -39,12 +39,6 @@ def run_sfm(frames_dir: Path, masks_dir: Path, colmap_dir: Path) -> pycolmap.Rec
         database_path=db_path,
         image_path=frames_dir,
         camera_mode=pycolmap.CameraMode.SINGLE,
-        sift_options=pycolmap.SiftExtractionOptions(
-            max_num_features=8192,
-        ),
-        camera_options=pycolmap.CameraOptions(
-            camera_model="SIMPLE_RADIAL",
-        ),
     )
 
     # ------------------------------------------------------------------ #
