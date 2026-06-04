@@ -12,17 +12,20 @@
 ## セットアップ
 
 ```bash
+# COLMAP のインストール（システムパッケージ）
+sudo apt install colmap   # Ubuntu
+
 # uv のインストール（未インストールの場合）
 curl -LsSf https://astral.sh/uv/install.sh | sh
 
-# Step 1: torch を先にインストール（GroundingDINO のビルドに必要）
+# Step 1: torch を先にインストール（GroundingDINO / SAM2 のビルドに必要）
 uv pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
 
 # Step 2: 残りの依存関係をインストール
 uv sync --python 3.12
 ```
 
-> **Note**: GroundingDINO の `setup.py` はビルド時に torch を参照します。
+> **Note**: GroundingDINO / SAM2 の `setup.py` はビルド時に torch を参照します。
 > `uv sync` より前に torch を入れておく必要があります。
 
 ## 使い方

@@ -14,16 +14,13 @@ dependencies = [
     "Pillow>=10.0.0",
     "numpy>=1.26.0",
     "opencv-python>=4.9.0",
-    # SfM
+    # SfM (COLMAP CLI + pycolmap for result parsing)
     "pycolmap>=3.8.0",
-    "hloc @ git+https://github.com/cvg/Hierarchical-Localization.git@master",
     # 3DGS
     "gsplat>=1.4.0",
     # CLI
     "typer>=0.12.0",
     "rich>=13.0.0",
-    # setuptools>=77 で LightGlue のパッケージ検出が壊れるため上限を設定
-    "setuptools<77",
 ]
 
 [project.scripts]
