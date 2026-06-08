@@ -17,7 +17,7 @@ from rich.panel import Panel
 app = typer.Typer(pretty_exceptions_show_locals=False)
 console = Console()
 
-_STEPS = ["extract", "mask", "sfm", "train"]
+_STEPS = ["extract", "mask", "sfm", "train", "mesh"]
 
 _STATE_FILE = "pipeline.json"
 
@@ -27,6 +27,7 @@ class Step(str, Enum):
     mask = "mask"
     sfm = "sfm"
     train = "train"
+    mesh = "mesh"
 
 
 # --------------------------------------------------------------------------- #
@@ -141,4 +142,19 @@ def pipeline(
         train_3dgs(colmap_dir, frames_dir, masks_dir, ply_path)
         _mark_done(output, "train")
 
-    console.print(Panel(f"[green]Done![/green]  Output: {ply_path}", style="bold green"))
+    # ---------------------------------------------------------------------- #
+    # Step 5: Mesh export (TSDF Fusion)
+    # ---------------------------------------------------------------------- #
+    mesh_dir = output / "mesh"
+    if resume and _is_done(output, "mesh"):
+        console.print("[dim]  [skip] mesh export[/dim]")
+    else:
+        console.print(Panel("Step 5 / 5 — Mesh export (TSDF Fusion)", style="bold blue"))
+        from recon_gs.export_mesh import export_mesh
+        export_mesh(colmap_dir, frames_dir, ply_path, mesh_dir)
+        _mark_done(output, "mesh")
+
+    console.print(Panel(
+        f"[green]Done![/green]\n  Gaussians : {ply_path}\n  Mesh      : {mesh_dir}",
+        style="bold green",
+    ))
