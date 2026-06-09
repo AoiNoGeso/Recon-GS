@@ -44,13 +44,13 @@ def _load_colmap_cameras(
 
         # World-to-camera rotation + translation (pycolmap >= 3.x API)
         cam_from_world = img.cam_from_world()
-        R = torch.tensor(cam_from_world.rotation.matrix(), dtype=torch.float32)
-        t = torch.tensor(cam_from_world.translation, dtype=torch.float32)
-        w2c = torch.eye(4)
+        R = torch.tensor(cam_from_world.rotation.matrix(), dtype=torch.float32, device=device)
+        t = torch.tensor(cam_from_world.translation, dtype=torch.float32, device=device)
+        w2c = torch.eye(4, device=device)
         w2c[:3, :3] = R
         w2c[:3, 3] = t
         c2w = apply_to_c2w(torch.linalg.inv(w2c), R_align)
-        c2w_list.append(c2w.to(device))
+        c2w_list.append(c2w)
 
         # Intrinsics
         fx = cam.focal_length_x if hasattr(cam, "focal_length_x") else cam.focal_length
