@@ -95,19 +95,23 @@ output/
 | `MESH_MAX_DEPTH` | 8.0 | 深度カットオフ [m]（シーン対角線に合わせて調整） |
 | `MESH_MIN_CLUSTER_TRIANGLES` | 500 | 孤立クラスタ除去の最小三角形数 |
 
-### 水平面マスク（床・天井・地面・空）
+### サーフェスマスク（Grounded-SAM2 プロンプトベース）
 
-法線ベースで水平面を検出し、TSDF 統合から除外します。
+Grounded-SAM2 (GroundingDINO + SAM2) でサーフェス領域を検出し、TSDF 統合から除外します。  
+動的物体マスキング (Step 2) と同じモデルを使用します。
 
 | 定数 | デフォルト | 説明 |
 |------|-----------|------|
 | `MESH_MASK_FLOOR` | True | 床をマスク（屋内） |
 | `MESH_MASK_CEILING` | True | 天井をマスク（屋内） |
-| `MESH_MASK_GROUND` | False | 地面をマスク（屋外） |
+| `MESH_MASK_GROUND` | False | 地面・道路をマスク（屋外） |
 | `MESH_MASK_SKY` | False | 空をマスク（屋外） |
-| `MESH_SURFACE_ANGLE_DEG` | 30.0 | 水平面判定の角度閾値 [deg] |
-
-> **Note**: 重力アライメント適用済みのシーンでは `MESH_WORLD_UP = [0, -1, 0]` のまま使用してください。
+| `MESH_FLOOR_PROMPTS` | floor, carpet, ... | 床検出プロンプト（カスタマイズ可） |
+| `MESH_CEILING_PROMPTS` | ceiling | 天井検出プロンプト |
+| `MESH_GROUND_PROMPTS` | ground, road, ... | 地面検出プロンプト |
+| `MESH_SKY_PROMPTS` | sky | 空検出プロンプト |
+| `MESH_GDINO_BOX_THRESHOLD` | 0.25 | GroundingDINO ボックス信頼度閾値 |
+| `MESH_GDINO_TEXT_THRESHOLD` | 0.20 | GroundingDINO テキスト一致閾値 |
 
 > **Note**: 別のシーンで再実行する場合は `colmap/sparse/0/gravity_rotation.json` を削除してください（重力アライメントキャッシュのリセット）。
 
@@ -121,6 +125,6 @@ COLMAP の再構成は重力方向が保証されないため、全カメラの 
 ### メッシュ生成 (`recon_gs/export_mesh.py`)
 
 1. 学習済みガウシアンから各訓練カメラの RGB・深度をレンダリング
-2. 法線ベースで床・天井等の水平面ピクセルをマスク
+2. Grounded-SAM2 (GroundingDINO + SAM2) でサーフェス領域（床・天井など）をプロンプトベースで検出しマスク
 3. Open3D の ScalableTSDFVolume で深度フレームを統合
 4. 孤立クラスタ・縮退三角形を除去して出力

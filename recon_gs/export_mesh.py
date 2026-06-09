@@ -3,12 +3,13 @@
 Pipeline
 --------
 1. Load trained Gaussians from .ply
-2. For each training camera:
+2. Build surface-exclusion prompts from config flags (floor/ceiling/ground/sky)
+3. For each training camera:
    a. Render RGB + depth (z in camera space)
-   b. Render world-space normals
-   c. Build per-pixel mask (floor / ceiling / ground / sky)
-3. Integrate unmasked (depth, RGB) frames into a TSDF volume
-4. Extract triangle mesh, clean, and save
+   b. Run Grounded-SAM2 on the RGB frame to detect surface regions
+   c. Zero-out masked pixels before TSDF integration
+4. Integrate unmasked (depth, RGB) frames into a TSDF volume
+5. Extract triangle mesh, clean, and save
 """
 
 from __future__ import annotations
@@ -29,15 +30,20 @@ from recon_gs.config import (
     MESH_VOXEL_SIZE,
     MESH_MAX_DEPTH,
     MESH_MIN_CLUSTER_TRIANGLES,
-    MESH_SURFACE_ANGLE_DEG,
     MESH_MASK_FLOOR,
     MESH_MASK_CEILING,
     MESH_MASK_GROUND,
     MESH_MASK_SKY,
-    MESH_WORLD_UP,
-    MESH_SKY_ALPHA_THRESHOLD,
-    MESH_SKY_TOP_FRACTION,
+    MESH_FLOOR_PROMPTS,
+    MESH_CEILING_PROMPTS,
+    MESH_GROUND_PROMPTS,
+    MESH_SKY_PROMPTS,
+    MESH_GDINO_BOX_THRESHOLD,
+    MESH_GDINO_TEXT_THRESHOLD,
 )
+
+_GDINO_MODEL_ID = "IDEA-Research/grounding-dino-tiny"
+_SAM2_MODEL_ID = "facebook/sam2-hiera-large"
 
 
 # --------------------------------------------------------------------------- #
@@ -48,7 +54,7 @@ def _load_ply_gaussians(ply_path: Path, device: torch.device):
     """Load Gaussians from a .ply file exported by _export_ply().
 
     Returns (means, scales, quats, opacities, sh_coeffs) — all on `device`.
-    scales and quats are activation-applied (raw values, not log/logit).
+    scales are activation-applied (not log).
     """
     ply = PlyData.read(str(ply_path))
     v = ply["vertex"]
@@ -57,14 +63,12 @@ def _load_ply_gaussians(ply_path: Path, device: torch.device):
         np.stack([v["x"], v["y"], v["z"]], axis=1), dtype=torch.float32, device=device
     )
 
-    # scales stored as log(scale) in PLY
     scales = torch.tensor(
         np.stack([v["scale_0"], v["scale_1"], v["scale_2"]], axis=1),
         dtype=torch.float32,
         device=device,
     ).exp()
 
-    # quaternion stored as-is [w, x, y, z]
     quats = torch.tensor(
         np.stack([v["rot_0"], v["rot_1"], v["rot_2"], v["rot_3"]], axis=1),
         dtype=torch.float32,
@@ -72,10 +76,8 @@ def _load_ply_gaussians(ply_path: Path, device: torch.device):
     )
     quats = quats / quats.norm(dim=-1, keepdim=True)
 
-    # opacity stored as logit(opacity)
     opacities = torch.tensor(v["opacity"], dtype=torch.float32, device=device).sigmoid()
 
-    # SH DC coefficients stored as-is (f_dc = SH coeff, NOT raw rgb)
     sh_dc = torch.tensor(
         np.stack([v["f_dc_0"], v["f_dc_1"], v["f_dc_2"]], axis=1),
         dtype=torch.float32,
@@ -87,34 +89,96 @@ def _load_ply_gaussians(ply_path: Path, device: torch.device):
 
 
 # --------------------------------------------------------------------------- #
-# Gaussian normal computation
+# Grounded-SAM2 surface masking
 # --------------------------------------------------------------------------- #
 
-def _quaternion_to_rotmat(quats: Tensor) -> Tensor:
-    """(N, 4) [w,x,y,z] → (N, 3, 3) rotation matrices."""
-    w, x, y, z = quats[:, 0], quats[:, 1], quats[:, 2], quats[:, 3]
-    R = torch.stack([
-        1 - 2*(y*y + z*z),  2*(x*y - w*z),      2*(x*z + w*y),
-        2*(x*y + w*z),      1 - 2*(x*x + z*z),   2*(y*z - w*x),
-        2*(x*z - w*y),      2*(y*z + w*x),        1 - 2*(x*x + y*y),
-    ], dim=-1).reshape(-1, 3, 3)
-    return R
+def _build_surface_prompts() -> list[str]:
+    """Collect active surface prompts from config flags."""
+    prompts: list[str] = []
+    if MESH_MASK_FLOOR:
+        prompts.extend(MESH_FLOOR_PROMPTS)
+    if MESH_MASK_CEILING:
+        prompts.extend(MESH_CEILING_PROMPTS)
+    if MESH_MASK_GROUND:
+        prompts.extend(MESH_GROUND_PROMPTS)
+    if MESH_MASK_SKY:
+        prompts.extend(MESH_SKY_PROMPTS)
+    return prompts
 
 
-def _gaussian_world_normals(scales: Tensor, quats: Tensor) -> Tensor:
-    """Compute per-Gaussian world-space normals as the shortest-axis direction.
+def _load_gsam2_models(device: torch.device):
+    """Load GroundingDINO and SAM2 models."""
+    from transformers import AutoModelForZeroShotObjectDetection, AutoProcessor
+    from sam2.build_sam import build_sam2_hf
+    from sam2.sam2_image_predictor import SAM2ImagePredictor
 
-    The normal of a Gaussian splat is conventionally taken as the direction
-    of its smallest scale (thinnest axis).
+    gdino_processor = AutoProcessor.from_pretrained(_GDINO_MODEL_ID)
+    gdino_model = (
+        AutoModelForZeroShotObjectDetection.from_pretrained(_GDINO_MODEL_ID)
+        .to(device)
+        .eval()
+    )
 
-    Returns: (N, 3) unit normals in world space.
+    sam2_model = build_sam2_hf(_SAM2_MODEL_ID, device=device)
+    sam2_predictor = SAM2ImagePredictor(sam2_model)
+
+    return gdino_processor, gdino_model, sam2_predictor
+
+
+def _surface_mask_gsam2(
+    image_np: np.ndarray,
+    gdino_processor,
+    gdino_model,
+    sam2_predictor,
+    prompt: str,
+    device: torch.device,
+) -> np.ndarray:
+    """Return boolean mask (H, W); True = surface pixel to exclude from TSDF.
+
+    Args:
+        image_np : (H, W, 3) uint8 RGB image
+        prompt   : period-separated GroundingDINO text prompt
     """
-    R = _quaternion_to_rotmat(quats)              # (N, 3, 3)
-    min_axis = scales.argmin(dim=-1)              # (N,)
-    # Gather the column of R corresponding to the shortest axis
-    idx = min_axis.view(-1, 1, 1).expand(-1, 3, 1)
-    normals = R.gather(2, idx).squeeze(-1)        # (N, 3)
-    return normals  # already unit-length (R is orthogonal)
+    from PIL import Image as PILImage
+
+    image_pil = PILImage.fromarray(image_np)
+    h, w = image_np.shape[:2]
+
+    inputs = gdino_processor(
+        images=image_pil,
+        text=prompt,
+        return_tensors="pt",
+    ).to(device)
+
+    with torch.no_grad():
+        outputs = gdino_model(**inputs)
+
+    results = gdino_processor.post_process_grounded_object_detection(
+        outputs,
+        inputs["input_ids"],
+        box_threshold=MESH_GDINO_BOX_THRESHOLD,
+        text_threshold=MESH_GDINO_TEXT_THRESHOLD,
+        target_sizes=[(h, w)],
+    )[0]
+
+    boxes = results["boxes"].cpu().numpy()  # (N, 4) xyxy
+
+    mask = np.zeros((h, w), dtype=bool)
+    if len(boxes) == 0:
+        return mask
+
+    sam2_predictor.set_image(image_np)
+    sam_masks, _, _ = sam2_predictor.predict(
+        box=boxes,
+        multimask_output=False,
+    )
+    # sam_masks: (N, 1, H, W) or (N, H, W)
+    if sam_masks.ndim == 4:
+        sam_masks = sam_masks[:, 0]
+    for m in sam_masks:
+        mask |= m.astype(bool)
+
+    return mask
 
 
 # --------------------------------------------------------------------------- #
@@ -128,24 +192,21 @@ def _render_view(
     quats: Tensor,
     opacities: Tensor,
     sh_coeffs: Tensor,
-    normals_world: Tensor,
     c2w: Tensor,
     K: Tensor,
     W: int,
     H: int,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """Render one camera view.
+) -> tuple[np.ndarray, np.ndarray]:
+    """Render RGB and depth for one camera view.
 
     Returns:
-        rgb   : (H, W, 3) float32 [0,1]
+        rgb   : (H, W, 3) float32 [0, 1]
         depth : (H, W)    float32 [m], 0 = no hit
-        normal: (H, W, 3) float32, world-space unit normals
-        alpha : (H, W)    float32 [0,1]
     """
     viewmat = torch.linalg.inv(c2w)[None]  # (1, 4, 4)
 
-    # ---- RGB rendering ----
-    rgb_render, alpha_render, _ = rasterization(
+    # ---- RGB ----
+    rgb_render, _, _ = rasterization(
         means=means,
         quats=quats,
         scales=scales,
@@ -158,21 +219,19 @@ def _render_view(
         sh_degree=0,
         packed=False,
     )
-    rgb   = rgb_render[0].clamp(0, 1).cpu().numpy()   # (H, W, 3)
-    alpha = alpha_render[0, ..., 0].cpu().numpy()      # (H, W)
+    rgb = rgb_render[0].clamp(0, 1).cpu().numpy()  # (H, W, 3)
 
-    # ---- Depth rendering (z in camera space as a 1-channel color) ----
+    # ---- Depth (z in camera space) ----
     w2c = torch.linalg.inv(c2w)
-    means_cam = (w2c[:3, :3] @ means.T + w2c[:3, 3:]).T   # (N, 3)
+    means_cam = (w2c[:3, :3] @ means.T + w2c[:3, 3:]).T  # (N, 3)
     z_vals = means_cam[:, 2].clamp(min=0.0)               # (N,)
-    depth_colors = z_vals.view(-1, 1)                      # (N, 1)
 
     depth_render, _, _ = rasterization(
         means=means,
         quats=quats,
         scales=scales,
         opacities=opacities,
-        colors=depth_colors,
+        colors=z_vals.view(-1, 1),
         viewmats=viewmat,
         Ks=K[None],
         width=W,
@@ -180,76 +239,9 @@ def _render_view(
         sh_degree=None,
         packed=False,
     )
-    depth = depth_render[0, ..., 0].cpu().numpy()          # (H, W)
+    depth = depth_render[0, ..., 0].cpu().numpy()  # (H, W)
 
-    # ---- Normal rendering (world-space 3-channel color) ----
-    # Normals are in [-1,1]; rasterization treats them as colors so we map to [0,1]
-    # We undo this mapping after rendering.
-    normal_colors = (normals_world + 1.0) * 0.5               # (N, 3)
-
-    normal_render, _, _ = rasterization(
-        means=means,
-        quats=quats,
-        scales=scales,
-        opacities=opacities,
-        colors=normal_colors,
-        viewmats=viewmat,
-        Ks=K[None],
-        width=W,
-        height=H,
-        sh_degree=None,
-        packed=False,
-    )
-    normal = normal_render[0].cpu().numpy() * 2.0 - 1.0   # (H, W, 3), back to [-1,1]
-    # Re-normalise per-pixel
-    norm_mag = np.linalg.norm(normal, axis=-1, keepdims=True).clip(min=1e-8)
-    normal = normal / norm_mag
-
-    return rgb, depth, normal, alpha
-
-
-# --------------------------------------------------------------------------- #
-# Mask building
-# --------------------------------------------------------------------------- #
-
-def _build_mask(
-    normal_world: np.ndarray,
-    alpha: np.ndarray,
-    H: int,
-) -> np.ndarray:
-    """Return boolean mask (H, W); True = pixel should be excluded from TSDF.
-
-    Masking rules (all controlled by config flags):
-      floor   : normal ≈ world-up   (upward-facing horizontal surface)
-      ceiling : normal ≈ -world-up  (downward-facing horizontal surface)
-      ground  : same as floor (outdoor alias)
-      sky     : low-alpha region in upper portion of image
-    """
-    world_up = np.array(MESH_WORLD_UP, dtype=np.float32)
-    world_up /= np.linalg.norm(world_up)
-
-    cos_thresh = np.cos(np.deg2rad(MESH_SURFACE_ANGLE_DEG))  # cos(30°) ≈ 0.866
-
-    mask = np.zeros(normal_world.shape[:2], dtype=bool)
-
-    if MESH_MASK_FLOOR or MESH_MASK_GROUND:
-        # dot(normal, world_up) > cos_thresh → nearly upward-facing → floor/ground
-        dot = (normal_world * world_up).sum(axis=-1)
-        mask |= dot > cos_thresh
-
-    if MESH_MASK_CEILING:
-        # dot(normal, -world_up) > cos_thresh → nearly downward-facing → ceiling
-        dot = (normal_world * (-world_up)).sum(axis=-1)
-        mask |= dot > cos_thresh
-
-    if MESH_MASK_SKY:
-        # Pixels with very low alpha in the upper fraction of the image
-        sky_rows = int(H * MESH_SKY_TOP_FRACTION)
-        sky_region = np.zeros_like(mask)
-        sky_region[:sky_rows, :] = True
-        mask |= sky_region & (alpha < MESH_SKY_ALPHA_THRESHOLD)
-
-    return mask
+    return rgb, depth
 
 
 # --------------------------------------------------------------------------- #
@@ -259,6 +251,7 @@ def _build_mask(
 def _clean_mesh(mesh: o3d.geometry.TriangleMesh) -> o3d.geometry.TriangleMesh:
     """Remove small disconnected clusters, unreferenced vertices, and degenerate triangles."""
     import copy
+
     tri_clusters, cluster_n_tris, _ = mesh.cluster_connected_triangles()
     tri_clusters = np.asarray(tri_clusters)
     cluster_n_tris = np.asarray(cluster_n_tris)
@@ -298,23 +291,31 @@ def export_mesh(
     # ---- Load Gaussians ----
     print("Loading Gaussians …")
     means, scales, quats, opacities, sh_coeffs = _load_ply_gaussians(ply_path, device)
-    normals_world = _gaussian_world_normals(scales, quats)  # (N, 3)
-
     print(f"  {len(means):,} Gaussians loaded")
-    active = (
-        f"floor={MESH_MASK_FLOOR}  ceiling={MESH_MASK_CEILING}  "
-        f"ground={MESH_MASK_GROUND}  sky={MESH_MASK_SKY}"
+
+    # ---- Gravity alignment ----
+    R_align = torch.tensor(
+        load_or_compute_gravity_rotation(sparse_dir), dtype=torch.float32, device=device
     )
-    print(f"  Active masks: {active}")
+
+    # ---- Grounded-SAM2 surface masking ----
+    surface_prompts = _build_surface_prompts()
+    use_surface_mask = len(surface_prompts) > 0
+    gdino_processor = gdino_model = sam2_predictor = None
+
+    if use_surface_mask:
+        prompt_str = " . ".join(surface_prompts) + " ."
+        active = (
+            f"floor={MESH_MASK_FLOOR}  ceiling={MESH_MASK_CEILING}  "
+            f"ground={MESH_MASK_GROUND}  sky={MESH_MASK_SKY}"
+        )
+        print(f"Loading Grounded-SAM2 for surface masking ({active}) …")
+        gdino_processor, gdino_model, sam2_predictor = _load_gsam2_models(device)
+    else:
+        print("  Surface masking disabled (all flags are False)")
 
     # ---- Load COLMAP cameras ----
     model = pycolmap.Reconstruction(str(sparse_dir))
-
-    # Gravity alignment (reuse cached rotation computed during training)
-    import torch as _torch
-    R_align = _torch.tensor(
-        load_or_compute_gravity_rotation(sparse_dir), dtype=_torch.float32, device=device
-    )
 
     # ---- TSDF Volume ----
     volume = o3d.pipelines.integration.ScalableTSDFVolume(
@@ -330,19 +331,19 @@ def export_mesh(
         img = model.images[image_id]
         cam = model.cameras[img.camera_id]
 
-        # Camera intrinsics
         fx = cam.focal_length_x if hasattr(cam, "focal_length_x") else cam.focal_length
         fy = cam.focal_length_y if hasattr(cam, "focal_length_y") else fx
         cx, cy = cam.principal_point_x, cam.principal_point_y
 
-        # Image size from actual frame
         img_path = frames_dir / img.name
         pil_img = PILImage.open(img_path).convert("RGB")
         W, H = pil_img.size
 
-        K = torch.tensor([[fx, 0, cx], [0, fy, cy], [0, 0, 1]], dtype=torch.float32, device=device)
+        K = torch.tensor(
+            [[fx, 0, cx], [0, fy, cy], [0, 0, 1]], dtype=torch.float32, device=device
+        )
 
-        # Camera pose (c2w)
+        # Camera pose (c2w with gravity alignment)
         cfw = img.cam_from_world()
         R_np = np.array(cfw.rotation.matrix(), dtype=np.float32)
         t_np = np.array(cfw.translation, dtype=np.float32)
@@ -354,23 +355,23 @@ def export_mesh(
             R_align,
         )
 
-        # Render this view
-        rgb, depth, normal_w, alpha = _render_view(
-            means, scales, quats, opacities, sh_coeffs,
-            normals_world, c2w, K, W, H,
-        )
+        # Render RGB + depth from Gaussians
+        rgb, depth = _render_view(means, scales, quats, opacities, sh_coeffs, c2w, K, W, H)
 
-        # Build mask
-        pixel_mask = _build_mask(normal_w, alpha, H)
-
-        # Zero-out masked depth before TSDF integration
+        # Surface mask via Grounded-SAM2
         depth_masked = depth.copy()
-        depth_masked[pixel_mask] = 0.0
+        if use_surface_mask:
+            image_np = np.array(pil_img)
+            surface_mask = _surface_mask_gsam2(
+                image_np, gdino_processor, gdino_model, sam2_predictor, prompt_str, device
+            )
+            depth_masked[surface_mask] = 0.0
+
         depth_masked[depth_masked > MESH_MAX_DEPTH] = 0.0
 
         # Integrate into TSDF
         rgb_uint8 = (rgb * 255).clip(0, 255).astype(np.uint8)
-        depth_uint16 = (depth_masked * 1000).clip(0, 65535).astype(np.uint16)  # mm
+        depth_uint16 = (depth_masked * 1000).clip(0, 65535).astype(np.uint16)
 
         o3d_color = o3d.geometry.Image(rgb_uint8)
         o3d_depth = o3d.geometry.Image(depth_uint16)
@@ -381,7 +382,6 @@ def export_mesh(
             convert_rgb_to_intensity=False,
         )
 
-        # w2c pose for Open3D (extrinsic: world→camera)
         pose_o3d = np.eye(4, dtype=np.float64)
         pose_o3d[:3, :3] = R_np.astype(np.float64)
         pose_o3d[:3, 3] = t_np.astype(np.float64)

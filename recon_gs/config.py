@@ -52,20 +52,22 @@ MESH_VOXEL_SIZE: float = 0.05          # voxel size [m]; smaller = finer mesh
 MESH_MAX_DEPTH: float = 8.0            # depth cutoff [m]; set to scene diagonal
 MESH_MIN_CLUSTER_TRIANGLES: int = 500  # remove isolated clusters below this size
 
-# Horizontal surface masking (normal-based)
-# Surfaces whose world-space normal is within MESH_SURFACE_ANGLE_DEG of the
-# up/down axis are masked before TSDF integration.
-MESH_SURFACE_ANGLE_DEG: float = 30.0  # half-cone angle for horizontal surface detection
+# --------------------------------------------------------------------------- #
+# Surface masking for mesh export (Grounded-SAM2 prompt-based)
+# --------------------------------------------------------------------------- #
+# Set each flag to True to exclude that surface from TSDF integration.
+# Prompts are passed to GroundingDINO; SAM2 refines the detected regions.
 
-MESH_MASK_FLOOR: bool = True     # mask upward-facing horizontal surfaces (indoor floor)
-MESH_MASK_CEILING: bool = True   # mask downward-facing horizontal surfaces (indoor ceiling)
-MESH_MASK_GROUND: bool = False   # same as floor, intended for outdoor ground
-MESH_MASK_SKY: bool = False      # mask sky regions (alpha-based + color heuristic)
+MESH_MASK_FLOOR: bool = True     # indoor floor
+MESH_MASK_CEILING: bool = True   # indoor ceiling
+MESH_MASK_GROUND: bool = False   # outdoor ground / road
+MESH_MASK_SKY: bool = False      # outdoor sky
 
-# World-space up vector (COLMAP convention: Y points down → world-up = [0,-1,0])
-# Change to [0, 1, 0] if your reconstruction has Y pointing up.
-MESH_WORLD_UP: list[float] = [0.0, -1.0, 0.0]
+MESH_FLOOR_PROMPTS: list[str] = ["floor", "carpet", "tile floor", "wooden floor", "rug"]
+MESH_CEILING_PROMPTS: list[str] = ["ceiling"]
+MESH_GROUND_PROMPTS: list[str] = ["ground", "road", "pavement", "sidewalk", "grass"]
+MESH_SKY_PROMPTS: list[str] = ["sky"]
 
-# Sky mask heuristics (only used when MESH_MASK_SKY=True)
-MESH_SKY_ALPHA_THRESHOLD: float = 0.1  # pixels with alpha below this → no-hit → sky candidate
-MESH_SKY_TOP_FRACTION: float = 0.5     # only apply sky mask to the top N fraction of the image
+# GroundingDINO thresholds for surface masking (can differ from dynamic-object masking)
+MESH_GDINO_BOX_THRESHOLD: float = 0.25
+MESH_GDINO_TEXT_THRESHOLD: float = 0.20
