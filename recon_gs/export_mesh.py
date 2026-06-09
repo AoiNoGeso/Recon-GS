@@ -48,7 +48,7 @@ from recon_gs.config import (
     MESH_PLANE_PIXEL_STRIDE,
     MESH_PLANE_VOXEL_SIZE,
     MESH_PLANE_MAX_INPUT_POINTS,
-    MESH_PLANE_MIN_VERTICAL_ALIGNMENT,
+    MESH_PLANE_HEIGHT_PERCENTILE,
 )
 
 _GDINO_MODEL_ID = "IDEA-Research/grounding-dino-tiny"
@@ -413,85 +413,92 @@ def _ransac_plane_numpy(
     return best_model, best_mask
 
 
+def _fit_one_plane(
+    points: np.ndarray,
+    colors: np.ndarray,
+    label: str,
+    seed: int = 0,
+) -> o3d.geometry.TriangleMesh | None:
+    """Run RANSAC on a pre-filtered point group and return a plane mesh."""
+    if len(points) < MESH_PLANE_MIN_POINTS:
+        print(f"  [{label}] too few points ({len(points):,}), skipped")
+        return None
+
+    # Subsample to cap RANSAC cost
+    if len(points) > MESH_PLANE_MAX_INPUT_POINTS:
+        rng = np.random.default_rng(seed=seed)
+        idx = rng.choice(len(points), MESH_PLANE_MAX_INPUT_POINTS, replace=False)
+        sample = points[idx]
+    else:
+        sample = points
+
+    plane_model, _ = _ransac_plane_numpy(
+        sample,
+        distance_threshold=MESH_PLANE_RANSAC_DISTANCE,
+        n_iterations=MESH_PLANE_RANSAC_ITERATIONS,
+        seed=seed,
+    )
+    if plane_model is None:
+        print(f"  [{label}] RANSAC failed")
+        return None
+
+    a, b, c, d = plane_model
+    dists = np.abs(points @ np.array([a, b, c], dtype=np.float32) + d)
+    inlier_mask = dists < MESH_PLANE_RANSAC_DISTANCE
+    n_inliers = int(inlier_mask.sum())
+    print(f"  [{label}] {n_inliers:,} inliers  model=({a:.2f}, {b:.2f}, {c:.2f}, {d:.2f})")
+
+    if n_inliers < MESH_PLANE_MIN_POINTS:
+        print(f"  [{label}] too few inliers, skipped")
+        return None
+
+    avg_color = colors[inlier_mask].mean(axis=0)
+    return _make_plane_mesh(points[inlier_mask], plane_model, avg_color)
+
+
 def _fit_plane_meshes(
     points: np.ndarray,
     colors: np.ndarray,
     world_up: np.ndarray,
 ) -> list[o3d.geometry.TriangleMesh]:
-    """Iteratively extract planes from a masked point cloud via RANSAC.
+    """Fit floor and ceiling planes by splitting on world-up height.
 
-    Only keeps planes whose normal aligns with world_up (floor/ceiling).
-    Uses pure numpy RANSAC to avoid Open3D segment_plane heap corruption bugs.
+    Splits the masked point cloud into a low-height group (floor candidates)
+    and a high-height group (ceiling candidates), then runs RANSAC on each.
+    This avoids the problem of wall-dominated iterative RANSAC.
     """
-    # Voxel downsample via Open3D (stable; only segment_plane triggers the bug)
+    # Voxel downsample
     pcd_all = o3d.geometry.PointCloud()
     pcd_all.points = o3d.utility.Vector3dVector(points)
     pcd_all.colors = o3d.utility.Vector3dVector(colors.astype(np.float64))
     pcd_down = pcd_all.voxel_down_sample(MESH_PLANE_VOXEL_SIZE)
-    remaining_pts = np.asarray(pcd_down.points, dtype=np.float32)
-    remaining_col = np.asarray(pcd_down.colors, dtype=np.float32)
-    del pcd_all, pcd_down  # release Open3D objects immediately
-    print(f"  After voxel downsampling: {len(remaining_pts):,} points "
+    all_pts = np.array(pcd_down.points, dtype=np.float32)
+    all_col = np.array(pcd_down.colors, dtype=np.float32)
+    del pcd_all, pcd_down
+    print(f"  After voxel downsampling: {len(all_pts):,} points "
           f"(was {len(points):,}, voxel={MESH_PLANE_VOXEL_SIZE}m)")
 
+    # Project onto world-up axis to get "height" for each point
+    # In COLMAP world_up points away from ground, so larger height = higher up
+    heights = all_pts @ world_up.astype(np.float32)
+    pct = MESH_PLANE_HEIGHT_PERCENTILE
+    low_cut = float(np.percentile(heights, pct))
+    high_cut = float(np.percentile(heights, 100.0 - pct))
+    print(f"  Height range: [{heights.min():.2f}, {heights.max():.2f}]  "
+          f"floor<{low_cut:.2f}  ceiling>{high_cut:.2f}")
+
+    floor_mask = heights <= low_cut
+    ceil_mask = heights >= high_cut
+    print(f"  Floor candidates: {floor_mask.sum():,}  "
+          f"Ceiling candidates: {ceil_mask.sum():,}")
+
     meshes: list[o3d.geometry.TriangleMesh] = []
-
-    for plane_idx in range(MESH_PLANE_MAX_PLANES):
-        if len(remaining_pts) < MESH_PLANE_MIN_POINTS:
-            break
-
-        # Subsample for RANSAC speed; inliers are re-evaluated on full cloud after
-        if len(remaining_pts) > MESH_PLANE_MAX_INPUT_POINTS:
-            rng = np.random.default_rng(seed=plane_idx)
-            idx = rng.choice(len(remaining_pts), MESH_PLANE_MAX_INPUT_POINTS, replace=False)
-            sample_pts = remaining_pts[idx]
-        else:
-            sample_pts = remaining_pts
-
-        plane_model, _ = _ransac_plane_numpy(
-            sample_pts,
-            distance_threshold=MESH_PLANE_RANSAC_DISTANCE,
-            n_iterations=MESH_PLANE_RANSAC_ITERATIONS,
-            seed=plane_idx,
-        )
-
-        if plane_model is None:
-            break
-
-        # Check that the plane normal aligns with world-up (floor/ceiling, not wall)
-        a, b, c, d = plane_model
-        normal_vec = np.array([a, b, c], dtype=np.float64)
-        alignment = float(abs(normal_vec @ world_up.astype(np.float64)))
-
-        # Re-evaluate inliers on the full remaining cloud
-        dists = np.abs(remaining_pts @ np.array([a, b, c], dtype=np.float32) + d)
-        inlier_mask = dists < MESH_PLANE_RANSAC_DISTANCE
-        n_inliers = int(inlier_mask.sum())
-
-        print(f"  [plane {plane_idx + 1}] {n_inliers:,} inliers  "
-              f"model=({a:.2f}, {b:.2f}, {c:.2f}, {d:.2f})  "
-              f"vertical_alignment={alignment:.2f}")
-
-        if alignment < MESH_PLANE_MIN_VERTICAL_ALIGNMENT:
-            print(f"    → skipped (not floor/ceiling, alignment {alignment:.2f} "
-                  f"< threshold {MESH_PLANE_MIN_VERTICAL_ALIGNMENT})")
-            # Still remove inliers so next iteration finds a different plane
-            remaining_pts = remaining_pts[~inlier_mask]
-            remaining_col = remaining_col[~inlier_mask]
-            continue
-
-        if n_inliers < MESH_PLANE_MIN_POINTS:
-            break
-
-        inlier_pts = remaining_pts[inlier_mask]
-        avg_color = remaining_col[inlier_mask].mean(axis=0)
-
-        mesh = _make_plane_mesh(inlier_pts, plane_model, avg_color)
+    for label, mask, seed in [("floor", floor_mask, 0), ("ceiling", ceil_mask, 1)]:
+        pts_group = all_pts[mask]
+        col_group = all_col[mask]
+        mesh = _fit_one_plane(pts_group, col_group, label=label, seed=seed)
         if mesh is not None:
             meshes.append(mesh)
-
-        remaining_pts = remaining_pts[~inlier_mask]
-        remaining_col = remaining_col[~inlier_mask]
 
     return meshes
 

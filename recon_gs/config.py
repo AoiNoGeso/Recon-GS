@@ -80,10 +80,9 @@ MESH_FILL_PLANES: bool = True  # enable/disable plane filling
 MESH_PLANE_RANSAC_DISTANCE: float = 0.05  # inlier distance threshold [m]
 MESH_PLANE_RANSAC_ITERATIONS: int = 1000  # RANSAC iterations
 MESH_PLANE_MIN_POINTS: int = 500  # skip plane if fewer masked points remain
-MESH_PLANE_MAX_PLANES: int = 4  # max planes to extract (iterative RANSAC)
-MESH_PLANE_PIXEL_STRIDE: int = 8  # collect every N-th masked pixel per frame
-MESH_PLANE_VOXEL_SIZE: float = 0.05  # voxel size for downsampling before RANSAC [m]
-MESH_PLANE_MAX_INPUT_POINTS: int = 50_000  # random subsample cap fed into segment_plane
-# Minimum |cos θ| between fitted plane normal and world-up to accept as floor/ceiling.
-# cos(45°)≈0.71; walls have small values (~0), floors/ceilings have large values (~1).
-MESH_PLANE_MIN_VERTICAL_ALIGNMENT: float = 0.7
+MESH_PLANE_PIXEL_STRIDE: int = 8          # collect every N-th masked pixel per frame
+MESH_PLANE_VOXEL_SIZE: float = 0.05       # voxel size for downsampling before RANSAC [m]
+MESH_PLANE_MAX_INPUT_POINTS: int = 50_000 # random subsample cap fed into RANSAC
+# Height percentile used to isolate floor/ceiling candidates before RANSAC.
+# Bottom MESH_PLANE_HEIGHT_PERCENTILE % → floor; top % → ceiling.
+MESH_PLANE_HEIGHT_PERCENTILE: float = 20.0
