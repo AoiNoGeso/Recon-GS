@@ -40,6 +40,11 @@ from recon_gs.config import (
     MESH_SKY_PROMPTS,
     MESH_GDINO_BOX_THRESHOLD,
     MESH_GDINO_TEXT_THRESHOLD,
+    MESH_FILL_PLANES,
+    MESH_PLANE_RANSAC_DISTANCE,
+    MESH_PLANE_RANSAC_ITERATIONS,
+    MESH_PLANE_MIN_POINTS,
+    MESH_PLANE_MAX_PLANES,
 )
 
 _GDINO_MODEL_ID = "IDEA-Research/grounding-dino-tiny"
@@ -245,6 +250,165 @@ def _render_view(
 
 
 # --------------------------------------------------------------------------- #
+# RANSAC plane fitting
+# --------------------------------------------------------------------------- #
+
+def _unproject_to_world(
+    depth: np.ndarray,
+    mask: np.ndarray,
+    rgb: np.ndarray,
+    c2w_np: np.ndarray,
+    fx: float,
+    fy: float,
+    cx: float,
+    cy: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Unproject masked depth pixels to world-space 3D points.
+
+    Returns:
+        points : (M, 3) float32 world-space XYZ
+        colors : (M, 3) float32 RGB [0, 1]
+    """
+    ys, xs = np.where(mask & (depth > 0) & (depth < MESH_MAX_DEPTH))
+    if len(ys) == 0:
+        return np.empty((0, 3), dtype=np.float32), np.empty((0, 3), dtype=np.float32)
+
+    z = depth[ys, xs]
+    x_c = (xs - cx) / fx * z
+    y_c = (ys - cy) / fy * z
+    pts_cam = np.stack([x_c, y_c, z], axis=1)  # (M, 3)
+
+    R_cw = c2w_np[:3, :3]
+    t_cw = c2w_np[:3, 3]
+    pts_world = (R_cw @ pts_cam.T + t_cw[:, None]).T  # (M, 3)
+
+    colors = rgb[ys, xs]  # (M, 3)
+    return pts_world.astype(np.float32), colors.astype(np.float32)
+
+
+def _make_plane_mesh(
+    inlier_pts: np.ndarray,
+    plane_model: tuple[float, float, float, float],
+    avg_color: np.ndarray,
+) -> o3d.geometry.TriangleMesh | None:
+    """Build a convex-hull triangle mesh from inlier points projected onto a plane.
+
+    Args:
+        inlier_pts  : (M, 3) 3D points already classified as inliers
+        plane_model : (a, b, c, d) with ax+by+cz+d=0, [a,b,c] unit normal
+        avg_color   : (3,) RGB [0, 1] to paint all vertices
+
+    Returns:
+        TriangleMesh or None if convex hull fails.
+    """
+    from scipy.spatial import ConvexHull
+
+    a, b, c, d = plane_model
+    normal = np.array([a, b, c], dtype=np.float64)
+    normal /= np.linalg.norm(normal)
+
+    # Project inlier points onto the plane
+    dists = inlier_pts @ normal + d
+    projected = inlier_pts - np.outer(dists, normal)  # (M, 3)
+
+    # Build orthonormal basis {u, v} in the plane
+    ref = np.array([1.0, 0.0, 0.0]) if abs(normal[0]) < 0.9 else np.array([0.0, 1.0, 0.0])
+    u_axis = np.cross(normal, ref)
+    u_axis /= np.linalg.norm(u_axis)
+    v_axis = np.cross(normal, u_axis)
+
+    # Project to 2D plane coordinates
+    pts_2d = np.stack([projected @ u_axis, projected @ v_axis], axis=1)
+
+    try:
+        hull = ConvexHull(pts_2d)
+    except Exception:
+        return None
+
+    hull_2d = pts_2d[hull.vertices]  # (K, 2)
+
+    # Reconstruct hull vertices in 3D on the plane
+    # For any point p on the plane: p = s*u + t*v + (-d)*normal
+    hull_3d = (
+        hull_2d[:, 0:1] * u_axis
+        + hull_2d[:, 1:2] * v_axis
+        + (-d) * normal
+    ).astype(np.float32)
+
+    # Fan triangulation from centroid
+    center = hull_3d.mean(axis=0, keepdims=True)  # (1, 3)
+    vertices = np.vstack([center, hull_3d])        # (K+1, 3)
+    n_hull = len(hull_3d)
+    triangles = [
+        [0, j + 1, j % n_hull + 2] for j in range(1, n_hull)
+    ]
+    triangles.append([0, n_hull, 1])  # close the fan
+
+    mesh = o3d.geometry.TriangleMesh()
+    mesh.vertices = o3d.utility.Vector3dVector(vertices)
+    mesh.triangles = o3d.utility.Vector3iVector(triangles)
+
+    # Paint with average color
+    color_arr = np.tile(avg_color.astype(np.float64), (len(vertices), 1))
+    mesh.vertex_colors = o3d.utility.Vector3dVector(color_arr)
+    mesh.compute_vertex_normals()
+    return mesh
+
+
+def _fit_plane_meshes(
+    points: np.ndarray,
+    colors: np.ndarray,
+) -> list[o3d.geometry.TriangleMesh]:
+    """Iteratively extract planes from a masked point cloud via RANSAC.
+
+    Each iteration finds the largest plane, removes its inliers, and repeats
+    until fewer than MESH_PLANE_MIN_POINTS points remain or MESH_PLANE_MAX_PLANES
+    planes have been found.
+
+    Returns a list of TriangleMesh objects, one per plane found.
+    """
+    meshes: list[o3d.geometry.TriangleMesh] = []
+    remaining_pts = points.copy()
+    remaining_col = colors.copy()
+
+    for plane_idx in range(MESH_PLANE_MAX_PLANES):
+        if len(remaining_pts) < MESH_PLANE_MIN_POINTS:
+            break
+
+        pcd = o3d.geometry.PointCloud()
+        pcd.points = o3d.utility.Vector3dVector(remaining_pts)
+
+        plane_model, inlier_indices = pcd.segment_plane(
+            distance_threshold=MESH_PLANE_RANSAC_DISTANCE,
+            ransac_n=3,
+            num_iterations=MESH_PLANE_RANSAC_ITERATIONS,
+        )
+
+        n_inliers = len(inlier_indices)
+        print(f"  [plane {plane_idx + 1}] {n_inliers:,} inliers  "
+              f"model=({plane_model[0]:.2f}, {plane_model[1]:.2f}, "
+              f"{plane_model[2]:.2f}, {plane_model[3]:.2f})")
+
+        if n_inliers < MESH_PLANE_MIN_POINTS:
+            break
+
+        inlier_pts = remaining_pts[inlier_indices]
+        avg_color = remaining_col[inlier_indices].mean(axis=0)
+
+        mesh = _make_plane_mesh(inlier_pts, plane_model, avg_color)
+        if mesh is not None:
+            meshes.append(mesh)
+
+        # Remove inliers for next iteration
+        keep = np.ones(len(remaining_pts), dtype=bool)
+        keep[inlier_indices] = False
+        remaining_pts = remaining_pts[keep]
+        remaining_col = remaining_col[keep]
+
+    return meshes
+
+
+# --------------------------------------------------------------------------- #
 # Mesh post-processing
 # --------------------------------------------------------------------------- #
 
@@ -324,6 +488,10 @@ def export_mesh(
         color_type=o3d.pipelines.integration.TSDFVolumeColorType.RGB8,
     )
 
+    # Accumulate masked surface points for RANSAC plane fitting
+    surface_pts_list: list[np.ndarray] = []
+    surface_col_list: list[np.ndarray] = []
+
     n_images = len(model.images)
     print(f"Rendering & integrating {n_images} views …")
 
@@ -367,6 +535,16 @@ def export_mesh(
             )
             depth_masked[surface_mask] = 0.0
 
+            # Collect masked points for RANSAC plane fitting
+            if MESH_FILL_PLANES:
+                c2w_np = np.linalg.inv(w2c_np)
+                pts, cols = _unproject_to_world(
+                    depth, surface_mask, rgb, c2w_np, fx, fy, cx, cy
+                )
+                if len(pts) > 0:
+                    surface_pts_list.append(pts)
+                    surface_col_list.append(cols)
+
         depth_masked[depth_masked > MESH_MAX_DEPTH] = 0.0
 
         # Integrate into TSDF
@@ -408,6 +586,19 @@ def export_mesh(
 
     print("Cleaning mesh …")
     mesh_clean = _clean_mesh(mesh)
+
+    # ---- RANSAC plane filling ----
+    if MESH_FILL_PLANES and len(surface_pts_list) > 0:
+        all_pts = np.concatenate(surface_pts_list, axis=0)
+        all_cols = np.concatenate(surface_col_list, axis=0)
+        print(f"Fitting planes to {len(all_pts):,} masked surface points …")
+        plane_meshes = _fit_plane_meshes(all_pts, all_cols)
+        print(f"  {len(plane_meshes)} plane(s) found")
+        for pm in plane_meshes:
+            mesh_clean += pm
+        if len(plane_meshes) > 0:
+            mesh_clean.compute_vertex_normals()
+
     post_path = output_dir / "tsdf_fusion_post.ply"
     o3d.io.write_triangle_mesh(
         str(post_path), mesh_clean,
@@ -415,4 +606,4 @@ def export_mesh(
         write_vertex_colors=True,
         write_vertex_normals=True,
     )
-    print(f"  Cleaned mesh → {post_path}  ({len(mesh_clean.triangles):,} triangles)")
+    print(f"  Final mesh → {post_path}  ({len(mesh_clean.triangles):,} triangles)")

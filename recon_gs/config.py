@@ -71,3 +71,13 @@ MESH_SKY_PROMPTS: list[str] = ["sky"]
 # GroundingDINO thresholds for surface masking (can differ from dynamic-object masking)
 MESH_GDINO_BOX_THRESHOLD: float = 0.25
 MESH_GDINO_TEXT_THRESHOLD: float = 0.20
+
+# --------------------------------------------------------------------------- #
+# RANSAC plane filling
+# Replace excluded surface regions with fitted flat planes.
+# --------------------------------------------------------------------------- #
+MESH_FILL_PLANES: bool = True              # enable/disable plane filling
+MESH_PLANE_RANSAC_DISTANCE: float = 0.05  # inlier distance threshold [m]
+MESH_PLANE_RANSAC_ITERATIONS: int = 1000  # RANSAC iterations
+MESH_PLANE_MIN_POINTS: int = 500          # skip plane if fewer masked points remain
+MESH_PLANE_MAX_PLANES: int = 4            # max planes to extract (iterative RANSAC)
