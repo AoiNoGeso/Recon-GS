@@ -371,25 +371,63 @@ def _make_plane_mesh(
     return mesh
 
 
+def _ransac_plane_numpy(
+    points: np.ndarray,
+    distance_threshold: float,
+    n_iterations: int,
+    seed: int = 0,
+) -> tuple[tuple[float, float, float, float] | None, np.ndarray]:
+    """Pure numpy RANSAC plane fitting. Avoids Open3D segment_plane heap bugs.
+
+    Returns:
+        plane_model : (a, b, c, d) unit-normal plane equation, or None if failed
+        inlier_mask : (N,) bool array
+    """
+    rng = np.random.default_rng(seed)
+    n = len(points)
+    best_mask = np.zeros(n, dtype=bool)
+    best_count = 0
+    best_model: tuple[float, float, float, float] | None = None
+
+    for _ in range(n_iterations):
+        idx = rng.choice(n, 3, replace=False)
+        p0, p1, p2 = points[idx]
+
+        normal = np.cross(p1 - p0, p2 - p0)
+        norm = np.linalg.norm(normal)
+        if norm < 1e-10:
+            continue
+        normal /= norm
+        d = float(-normal @ p0)
+
+        dists = np.abs(points @ normal + d)
+        mask = dists < distance_threshold
+        count = int(mask.sum())
+
+        if count > best_count:
+            best_count = count
+            best_mask = mask
+            best_model = (float(normal[0]), float(normal[1]), float(normal[2]), d)
+
+    return best_model, best_mask
+
+
 def _fit_plane_meshes(
     points: np.ndarray,
     colors: np.ndarray,
 ) -> list[o3d.geometry.TriangleMesh]:
     """Iteratively extract planes from a masked point cloud via RANSAC.
 
-    Each iteration finds the largest plane, removes its inliers, and repeats
-    until fewer than MESH_PLANE_MIN_POINTS points remain or MESH_PLANE_MAX_PLANES
-    planes have been found.
-
-    Returns a list of TriangleMesh objects, one per plane found.
+    Uses pure numpy RANSAC to avoid Open3D segment_plane heap corruption bugs.
     """
-    # Voxel downsample to remove redundant points and bound RANSAC cost
+    # Voxel downsample via Open3D (stable; only segment_plane triggers the bug)
     pcd_all = o3d.geometry.PointCloud()
     pcd_all.points = o3d.utility.Vector3dVector(points)
     pcd_all.colors = o3d.utility.Vector3dVector(colors.astype(np.float64))
     pcd_down = pcd_all.voxel_down_sample(MESH_PLANE_VOXEL_SIZE)
     remaining_pts = np.asarray(pcd_down.points, dtype=np.float32)
     remaining_col = np.asarray(pcd_down.colors, dtype=np.float32)
+    del pcd_all, pcd_down  # release Open3D objects immediately
     print(f"  After voxel downsampling: {len(remaining_pts):,} points "
           f"(was {len(points):,}, voxel={MESH_PLANE_VOXEL_SIZE}m)")
 
@@ -399,50 +437,45 @@ def _fit_plane_meshes(
         if len(remaining_pts) < MESH_PLANE_MIN_POINTS:
             break
 
-        # Randomly subsample to cap RANSAC memory usage
+        # Subsample for RANSAC speed; inliers are re-evaluated on full cloud after
         if len(remaining_pts) > MESH_PLANE_MAX_INPUT_POINTS:
             rng = np.random.default_rng(seed=plane_idx)
             idx = rng.choice(len(remaining_pts), MESH_PLANE_MAX_INPUT_POINTS, replace=False)
             sample_pts = remaining_pts[idx]
-            sample_col = remaining_col[idx]
         else:
             sample_pts = remaining_pts
-            sample_col = remaining_col
 
-        pcd = o3d.geometry.PointCloud()
-        pcd.points = o3d.utility.Vector3dVector(sample_pts)
-
-        plane_model, inlier_indices_sample = pcd.segment_plane(
+        plane_model, _ = _ransac_plane_numpy(
+            sample_pts,
             distance_threshold=MESH_PLANE_RANSAC_DISTANCE,
-            ransac_n=3,
-            num_iterations=MESH_PLANE_RANSAC_ITERATIONS,
+            n_iterations=MESH_PLANE_RANSAC_ITERATIONS,
+            seed=plane_idx,
         )
 
-        # Apply the fitted plane model to the full remaining cloud to find all inliers
-        a, b, c, d = plane_model
-        dists = np.abs(remaining_pts @ np.array([a, b, c]) + d)
-        inlier_mask = dists < MESH_PLANE_RANSAC_DISTANCE
-        inlier_indices = np.where(inlier_mask)[0]
+        if plane_model is None:
+            break
 
-        n_inliers = len(inlier_indices)
+        # Re-evaluate inliers on the full remaining cloud
+        a, b, c, d = plane_model
+        dists = np.abs(remaining_pts @ np.array([a, b, c], dtype=np.float32) + d)
+        inlier_mask = dists < MESH_PLANE_RANSAC_DISTANCE
+        n_inliers = int(inlier_mask.sum())
+
         print(f"  [plane {plane_idx + 1}] {n_inliers:,} inliers  "
-              f"model=({plane_model[0]:.2f}, {plane_model[1]:.2f}, "
-              f"{plane_model[2]:.2f}, {plane_model[3]:.2f})")
+              f"model=({a:.2f}, {b:.2f}, {c:.2f}, {d:.2f})")
 
         if n_inliers < MESH_PLANE_MIN_POINTS:
             break
 
-        inlier_pts = remaining_pts[inlier_indices]
-        avg_color = remaining_col[inlier_indices].mean(axis=0)
+        inlier_pts = remaining_pts[inlier_mask]
+        avg_color = remaining_col[inlier_mask].mean(axis=0)
 
         mesh = _make_plane_mesh(inlier_pts, plane_model, avg_color)
         if mesh is not None:
             meshes.append(mesh)
 
-        # Remove inliers for next iteration
-        keep = ~inlier_mask
-        remaining_pts = remaining_pts[keep]
-        remaining_col = remaining_col[keep]
+        remaining_pts = remaining_pts[~inlier_mask]
+        remaining_col = remaining_col[~inlier_mask]
 
     return meshes
 
