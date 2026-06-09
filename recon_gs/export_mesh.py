@@ -9,7 +9,9 @@ Pipeline
    b. Run Grounded-SAM2 on the RGB frame to detect surface regions
    c. Zero-out masked pixels before TSDF integration
 4. Integrate unmasked (depth, RGB) frames into a TSDF volume
-5. Extract triangle mesh, clean, and save
+5. Extract triangle mesh and clean (remove small clusters)
+6. Split cleaned mesh vertices by height → run RANSAC on floor/ceiling groups
+7. Merge plane meshes into cleaned mesh and save
 """
 
 from __future__ import annotations
@@ -44,8 +46,6 @@ from recon_gs.config import (
     MESH_PLANE_RANSAC_DISTANCE,
     MESH_PLANE_RANSAC_ITERATIONS,
     MESH_PLANE_MIN_POINTS,
-    MESH_PLANE_PIXEL_STRIDE,
-    MESH_PLANE_VOXEL_SIZE,
     MESH_PLANE_MAX_INPUT_POINTS,
     MESH_PLANE_HEIGHT_PERCENTILE,
 )
@@ -256,52 +256,6 @@ def _render_view(
 # RANSAC plane fitting
 # --------------------------------------------------------------------------- #
 
-def _unproject_to_world(
-    depth: np.ndarray,
-    mask: np.ndarray,
-    rgb: np.ndarray,
-    c2w_np: np.ndarray,
-    fx: float,
-    fy: float,
-    cx: float,
-    cy: float,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Unproject masked depth pixels to world-space 3D points.
-
-    Pixels are subsampled by MESH_PLANE_PIXEL_STRIDE to limit point count.
-
-    Returns:
-        points : (M, 3) float32 world-space XYZ
-        colors : (M, 3) float32 RGB [0, 1]
-    """
-    # Subsampled pixel grid to reduce point count
-    H, W = mask.shape
-    stride = MESH_PLANE_PIXEL_STRIDE
-    gy, gx = np.meshgrid(
-        np.arange(0, H, stride, dtype=np.int32),
-        np.arange(0, W, stride, dtype=np.int32),
-        indexing="ij",
-    )
-    gy, gx = gy.ravel(), gx.ravel()
-    valid = mask[gy, gx] & (depth[gy, gx] > 0) & (depth[gy, gx] < MESH_MAX_DEPTH)
-    ys, xs = gy[valid], gx[valid]
-
-    if len(ys) == 0:
-        return np.empty((0, 3), dtype=np.float32), np.empty((0, 3), dtype=np.float32)
-
-    z = depth[ys, xs]
-    x_c = (xs - cx) / fx * z
-    y_c = (ys - cy) / fy * z
-    pts_cam = np.stack([x_c, y_c, z], axis=1)  # (M, 3)
-
-    R_cw = c2w_np[:3, :3]
-    t_cw = c2w_np[:3, 3]
-    pts_world = (R_cw @ pts_cam.T + t_cw[:, None]).T  # (M, 3)
-
-    colors = rgb[ys, xs]  # (M, 3)
-    return pts_world.astype(np.float32), colors.astype(np.float32)
-
-
 def _make_plane_mesh(
     inlier_pts: np.ndarray,
     plane_model: tuple[float, float, float, float],
@@ -455,46 +409,40 @@ def _fit_one_plane(
     return _make_plane_mesh(points[inlier_mask], plane_model, avg_color)
 
 
-def _fit_plane_meshes(
-    points: np.ndarray,
-    colors: np.ndarray,
+def _fill_planes_from_mesh(
+    mesh_clean: o3d.geometry.TriangleMesh,
     world_up: np.ndarray,
 ) -> list[o3d.geometry.TriangleMesh]:
-    """Fit floor and ceiling planes by splitting on world-up height.
+    """Fit floor and ceiling planes using vertices from the cleaned mesh.
 
-    Splits the masked point cloud into a low-height group (floor candidates)
-    and a high-height group (ceiling candidates), then runs RANSAC on each.
-    This avoids the problem of wall-dominated iterative RANSAC.
+    Extracts bottom/top MESH_PLANE_HEIGHT_PERCENTILE % of vertices along
+    world_up, then runs RANSAC on each group to build a plane mesh.
+    Using cleaned mesh vertices avoids noise from raw depth data.
     """
-    # Voxel downsample
-    pcd_all = o3d.geometry.PointCloud()
-    pcd_all.points = o3d.utility.Vector3dVector(points)
-    pcd_all.colors = o3d.utility.Vector3dVector(colors.astype(np.float64))
-    pcd_down = pcd_all.voxel_down_sample(MESH_PLANE_VOXEL_SIZE)
-    all_pts = np.array(pcd_down.points, dtype=np.float32)
-    all_col = np.array(pcd_down.colors, dtype=np.float32)
-    del pcd_all, pcd_down
-    print(f"  After voxel downsampling: {len(all_pts):,} points "
-          f"(was {len(points):,}, voxel={MESH_PLANE_VOXEL_SIZE}m)")
+    verts = np.asarray(mesh_clean.vertices).copy()
+    colors = (
+        np.asarray(mesh_clean.vertex_colors).copy()
+        if mesh_clean.has_vertex_colors()
+        else np.ones((len(verts), 3), dtype=np.float32)
+    )
 
-    # Project onto world-up axis to get "height" for each point
-    # In COLMAP world_up points away from ground, so larger height = higher up
-    heights = all_pts @ world_up.astype(np.float32)
+    up = world_up.astype(np.float32)
+    up /= np.linalg.norm(up)
+    heights = verts @ up
+
     pct = MESH_PLANE_HEIGHT_PERCENTILE
     low_cut = float(np.percentile(heights, pct))
     high_cut = float(np.percentile(heights, 100.0 - pct))
-    print(f"  Height range: [{heights.min():.2f}, {heights.max():.2f}]  "
-          f"floor<{low_cut:.2f}  ceiling>{high_cut:.2f}")
-
-    floor_mask = heights <= low_cut
-    ceil_mask = heights >= high_cut
-    print(f"  Floor candidates: {floor_mask.sum():,}  "
-          f"Ceiling candidates: {ceil_mask.sum():,}")
+    print(f"  Mesh height range [{heights.min():.2f}, {heights.max():.2f}]  "
+          f"floor≤{low_cut:.2f}  ceiling≥{high_cut:.2f}")
 
     meshes: list[o3d.geometry.TriangleMesh] = []
-    for label, mask, seed in [("floor", floor_mask, 0), ("ceiling", ceil_mask, 1)]:
-        pts_group = all_pts[mask]
-        col_group = all_col[mask]
+    for label, mask, seed in [
+        ("floor", heights <= low_cut, 0),
+        ("ceiling", heights >= high_cut, 1),
+    ]:
+        pts_group = verts[mask].astype(np.float32)
+        col_group = colors[mask].astype(np.float32)
         mesh = _fit_one_plane(pts_group, col_group, label=label, seed=seed)
         if mesh is not None:
             meshes.append(mesh)
@@ -644,10 +592,6 @@ def export_mesh(
         color_type=o3d.pipelines.integration.TSDFVolumeColorType.RGB8,
     )
 
-    # Accumulate masked surface points for RANSAC plane fitting
-    surface_pts_list: list[np.ndarray] = []
-    surface_col_list: list[np.ndarray] = []
-
     n_images = len(model.images)
     print(f"Rendering & integrating {n_images} views …")
 
@@ -690,16 +634,6 @@ def export_mesh(
                 image_np, gdino_processor, gdino_model, sam2_predictor, prompt_str, device
             )
             depth_masked[surface_mask] = 0.0
-
-            # Collect masked points for RANSAC plane fitting
-            if MESH_FILL_PLANES:
-                c2w_np = np.linalg.inv(w2c_np)
-                pts, cols = _unproject_to_world(
-                    depth, surface_mask, rgb, c2w_np, fx, fy, cx, cy
-                )
-                if len(pts) > 0:
-                    surface_pts_list.append(pts)
-                    surface_col_list.append(cols)
 
         depth_masked[depth_masked > MESH_MAX_DEPTH] = 0.0
 
@@ -744,18 +678,15 @@ def export_mesh(
     mesh_clean = _clean_mesh(mesh)
     del mesh  # release raw mesh now to avoid shared-buffer double-free
 
-    # ---- RANSAC plane filling ----
-    if MESH_FILL_PLANES and len(surface_pts_list) > 0:
-        all_pts = np.concatenate(surface_pts_list, axis=0)
-        all_cols = np.concatenate(surface_col_list, axis=0)
-        # World-up in unaligned COLMAP space: R_align^T @ [0,-1,0]
+    # ---- RANSAC plane filling from cleaned mesh vertices ----
+    if MESH_FILL_PLANES:
         R_align_np = load_or_compute_gravity_rotation(sparse_dir)
         world_up = R_align_np.T @ np.array([0.0, -1.0, 0.0], dtype=np.float32)
         world_up /= np.linalg.norm(world_up)
 
-        print(f"Fitting planes to {len(all_pts):,} masked surface points …")
-        plane_meshes = _fit_plane_meshes(all_pts, all_cols, world_up=world_up)
-        print(f"  {len(plane_meshes)} plane(s) found")
+        print("Building RANSAC planes from cleaned mesh vertices …")
+        plane_meshes = _fill_planes_from_mesh(mesh_clean, world_up)
+        print(f"  {len(plane_meshes)} plane(s) built")
         if plane_meshes:
             mesh_clean = _merge_meshes(mesh_clean, plane_meshes)
             del plane_meshes
