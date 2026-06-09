@@ -45,6 +45,8 @@ from recon_gs.config import (
     MESH_PLANE_RANSAC_ITERATIONS,
     MESH_PLANE_MIN_POINTS,
     MESH_PLANE_MAX_PLANES,
+    MESH_PLANE_PIXEL_STRIDE,
+    MESH_PLANE_VOXEL_SIZE,
 )
 
 _GDINO_MODEL_ID = "IDEA-Research/grounding-dino-tiny"
@@ -265,11 +267,24 @@ def _unproject_to_world(
 ) -> tuple[np.ndarray, np.ndarray]:
     """Unproject masked depth pixels to world-space 3D points.
 
+    Pixels are subsampled by MESH_PLANE_PIXEL_STRIDE to limit point count.
+
     Returns:
         points : (M, 3) float32 world-space XYZ
         colors : (M, 3) float32 RGB [0, 1]
     """
-    ys, xs = np.where(mask & (depth > 0) & (depth < MESH_MAX_DEPTH))
+    # Subsampled pixel grid to reduce point count
+    H, W = mask.shape
+    stride = MESH_PLANE_PIXEL_STRIDE
+    gy, gx = np.meshgrid(
+        np.arange(0, H, stride, dtype=np.int32),
+        np.arange(0, W, stride, dtype=np.int32),
+        indexing="ij",
+    )
+    gy, gx = gy.ravel(), gx.ravel()
+    valid = mask[gy, gx] & (depth[gy, gx] > 0) & (depth[gy, gx] < MESH_MAX_DEPTH)
+    ys, xs = gy[valid], gx[valid]
+
     if len(ys) == 0:
         return np.empty((0, 3), dtype=np.float32), np.empty((0, 3), dtype=np.float32)
 
@@ -367,9 +382,17 @@ def _fit_plane_meshes(
 
     Returns a list of TriangleMesh objects, one per plane found.
     """
+    # Voxel downsample to remove redundant points and bound RANSAC cost
+    pcd_all = o3d.geometry.PointCloud()
+    pcd_all.points = o3d.utility.Vector3dVector(points)
+    pcd_all.colors = o3d.utility.Vector3dVector(colors.astype(np.float64))
+    pcd_down = pcd_all.voxel_down_sample(MESH_PLANE_VOXEL_SIZE)
+    remaining_pts = np.asarray(pcd_down.points, dtype=np.float32)
+    remaining_col = np.asarray(pcd_down.colors, dtype=np.float32)
+    print(f"  After voxel downsampling: {len(remaining_pts):,} points "
+          f"(was {len(points):,}, voxel={MESH_PLANE_VOXEL_SIZE}m)")
+
     meshes: list[o3d.geometry.TriangleMesh] = []
-    remaining_pts = points.copy()
-    remaining_col = colors.copy()
 
     for plane_idx in range(MESH_PLANE_MAX_PLANES):
         if len(remaining_pts) < MESH_PLANE_MIN_POINTS:

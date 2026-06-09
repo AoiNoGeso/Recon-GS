@@ -81,3 +81,5 @@ MESH_PLANE_RANSAC_DISTANCE: float = 0.05  # inlier distance threshold [m]
 MESH_PLANE_RANSAC_ITERATIONS: int = 1000  # RANSAC iterations
 MESH_PLANE_MIN_POINTS: int = 500          # skip plane if fewer masked points remain
 MESH_PLANE_MAX_PLANES: int = 4            # max planes to extract (iterative RANSAC)
+MESH_PLANE_PIXEL_STRIDE: int = 8          # collect every N-th masked pixel per frame
+MESH_PLANE_VOXEL_SIZE: float = 0.05       # voxel size for downsampling before RANSAC [m]
