@@ -24,6 +24,7 @@ from plyfile import PlyData
 from gsplat import rasterization
 import open3d as o3d
 
+from recon_gs.align import load_or_compute_gravity_rotation, apply_to_c2w
 from recon_gs.config import (
     MESH_VOXEL_SIZE,
     MESH_MAX_DEPTH,
@@ -164,7 +165,7 @@ def _render_view(
     w2c = torch.linalg.inv(c2w)
     means_cam = (w2c[:3, :3] @ means.T + w2c[:3, 3:]).T   # (N, 3)
     z_vals = means_cam[:, 2].clamp(min=0.0)               # (N,)
-    depth_colors = z_vals.view(-1, 1, 1)                   # (N, 1, 1)
+    depth_colors = z_vals.view(-1, 1)                      # (N, 1)
 
     depth_render, _, _ = rasterization(
         means=means,
@@ -184,7 +185,7 @@ def _render_view(
     # ---- Normal rendering (world-space 3-channel color) ----
     # Normals are in [-1,1]; rasterization treats them as colors so we map to [0,1]
     # We undo this mapping after rendering.
-    normal_colors = ((normals_world + 1.0) * 0.5).unsqueeze(1)  # (N, 1, 3)
+    normal_colors = (normals_world + 1.0) * 0.5               # (N, 3)
 
     normal_render, _, _ = rasterization(
         means=means,
@@ -309,6 +310,12 @@ def export_mesh(
     # ---- Load COLMAP cameras ----
     model = pycolmap.Reconstruction(str(sparse_dir))
 
+    # Gravity alignment (reuse cached rotation computed during training)
+    import torch as _torch
+    R_align = _torch.tensor(
+        load_or_compute_gravity_rotation(sparse_dir), dtype=_torch.float32, device=device
+    )
+
     # ---- TSDF Volume ----
     volume = o3d.pipelines.integration.ScalableTSDFVolume(
         voxel_length=MESH_VOXEL_SIZE,
@@ -342,7 +349,10 @@ def export_mesh(
         w2c_np = np.eye(4, dtype=np.float32)
         w2c_np[:3, :3] = R_np
         w2c_np[:3, 3] = t_np
-        c2w = torch.tensor(np.linalg.inv(w2c_np), dtype=torch.float32, device=device)
+        c2w = apply_to_c2w(
+            torch.tensor(np.linalg.inv(w2c_np), dtype=torch.float32, device=device),
+            R_align,
+        )
 
         # Render this view
         rgb, depth, normal_w, alpha = _render_view(

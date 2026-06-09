@@ -10,6 +10,7 @@ import pycolmap
 from gsplat import rasterization
 
 from recon_gs.config import TRAIN_ITERATIONS
+from recon_gs.align import load_or_compute_gravity_rotation, apply_to_c2w
 
 
 # --------------------------------------------------------------------------- #
@@ -30,6 +31,11 @@ def _load_colmap_cameras(
 
     model = pycolmap.Reconstruction(str(sparse_dir))
 
+    # Gravity alignment: rotate world so that Y points up
+    R_align = torch.tensor(
+        load_or_compute_gravity_rotation(sparse_dir), dtype=torch.float32, device=device
+    )
+
     c2w_list, K_list, image_list, mask_list = [], [], [], []
 
     for image_id in sorted(model.images):
@@ -43,7 +49,7 @@ def _load_colmap_cameras(
         w2c = torch.eye(4)
         w2c[:3, :3] = R
         w2c[:3, 3] = t
-        c2w = torch.linalg.inv(w2c)
+        c2w = apply_to_c2w(torch.linalg.inv(w2c), R_align)
         c2w_list.append(c2w.to(device))
 
         # Intrinsics
@@ -78,7 +84,12 @@ def _init_gaussians_from_sparse(sparse_dir: Path, device: torch.device):
     """Initialise Gaussian means from COLMAP sparse point cloud."""
     model = pycolmap.Reconstruction(str(sparse_dir))
     points = np.array([p.xyz for p in model.points3D.values()], dtype=np.float32)
-    means = torch.tensor(points, device=device)
+
+    # Apply same gravity alignment as cameras
+    R_align = torch.tensor(
+        load_or_compute_gravity_rotation(sparse_dir), dtype=torch.float32, device=device
+    )
+    means = (R_align @ torch.tensor(points, device=device).T).T
     n = len(means)
 
     # Covariance (log-scale + quaternion)
