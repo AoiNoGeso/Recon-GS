@@ -436,11 +436,14 @@ def _fill_planes_from_mesh(
     print(f"  Mesh height range [{heights.min():.2f}, {heights.max():.2f}]  "
           f"floor≤{low_cut:.2f}  ceiling≥{high_cut:.2f}")
 
+    candidates = []
+    if MESH_MASK_FLOOR or MESH_MASK_GROUND:
+        candidates.append(("floor", heights <= low_cut, 0))
+    if MESH_MASK_CEILING or MESH_MASK_SKY:
+        candidates.append(("ceiling", heights >= high_cut, 1))
+
     meshes: list[o3d.geometry.TriangleMesh] = []
-    for label, mask, seed in [
-        ("floor", heights <= low_cut, 0),
-        ("ceiling", heights >= high_cut, 1),
-    ]:
+    for label, mask, seed in candidates:
         pts_group = verts[mask].astype(np.float32)
         col_group = colors[mask].astype(np.float32)
         mesh = _fit_one_plane(pts_group, col_group, label=label, seed=seed)
