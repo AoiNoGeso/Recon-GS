@@ -41,7 +41,6 @@ from recon_gs.config import (
     MESH_GDINO_BOX_THRESHOLD,
     MESH_GDINO_TEXT_THRESHOLD,
     MESH_FILL_PLANES,
-    MESH_PLANE_PIXEL_STRIDE,
     MESH_PLANE_VOXEL_SIZE,
     MESH_PLANE_MIN_POINTS,
     MESH_PLANE_HEIGHT_PERCENTILE,
@@ -253,49 +252,44 @@ def _render_view(
 # Convex-hull plane filling
 # --------------------------------------------------------------------------- #
 
-def _unproject_to_world(
-    depth: np.ndarray,
-    mask: np.ndarray,
-    rgb: np.ndarray,
-    c2w_np: np.ndarray,
-    fx: float,
-    fy: float,
-    cx: float,
-    cy: float,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Unproject masked depth pixels to world-space 3D points.
+def _fill_planes_from_mesh(
+    mesh_clean: "o3d.geometry.TriangleMesh",
+    world_up: np.ndarray,
+) -> list["o3d.geometry.TriangleMesh"]:
+    """Derive floor/ceiling plane meshes from the CLEANED TSDF mesh vertices.
 
-    Pixels are subsampled by MESH_PLANE_PIXEL_STRIDE to limit point count.
-
-    Returns:
-        points : (M, 3) float32 world-space XYZ
-        colors : (M, 3) float32 RGB [0, 1]
+    Uses the bottom/top MESH_PLANE_HEIGHT_PERCENTILE % of mesh vertices as
+    floor/ceiling candidates.  The cleaned mesh is noise-free, so plane fits
+    are more accurate than using raw per-frame depth points.
     """
-    H, W = mask.shape
-    stride = MESH_PLANE_PIXEL_STRIDE
-    gy, gx = np.meshgrid(
-        np.arange(0, H, stride, dtype=np.int32),
-        np.arange(0, W, stride, dtype=np.int32),
-        indexing="ij",
+    verts  = np.asarray(mesh_clean.vertices).copy()   # (V, 3)
+    colors = (
+        np.asarray(mesh_clean.vertex_colors).copy()
+        if mesh_clean.has_vertex_colors()
+        else np.ones((len(verts), 3), dtype=np.float64)
     )
-    gy, gx = gy.ravel(), gx.ravel()
-    valid = mask[gy, gx] & (depth[gy, gx] > 0) & (depth[gy, gx] < MESH_MAX_DEPTH)
-    ys, xs = gy[valid], gx[valid]
 
-    if len(ys) == 0:
-        return np.empty((0, 3), dtype=np.float32), np.empty((0, 3), dtype=np.float32)
+    up = world_up.astype(np.float32)
+    up /= np.linalg.norm(up)
+    heights = verts @ up
 
-    z = depth[ys, xs]
-    x_c = (xs - cx) / fx * z
-    y_c = (ys - cy) / fy * z
-    pts_cam = np.stack([x_c, y_c, z], axis=1)
+    pct = MESH_PLANE_HEIGHT_PERCENTILE
+    low_cut  = float(np.percentile(heights, pct))
+    high_cut = float(np.percentile(heights, 100.0 - pct))
+    print(f"  Mesh height range [{heights.min():.2f}, {heights.max():.2f}]  "
+          f"floor≤{low_cut:.2f}  ceiling≥{high_cut:.2f}")
 
-    R_cw = c2w_np[:3, :3]
-    t_cw = c2w_np[:3, 3]
-    pts_world = (R_cw @ pts_cam.T + t_cw[:, None]).T
-
-    colors = rgb[ys, xs]
-    return pts_world.astype(np.float32), colors.astype(np.float32)
+    meshes: list[o3d.geometry.TriangleMesh] = []
+    for label, mask in [("floor", heights <= low_cut), ("ceiling", heights >= high_cut)]:
+        m = _convex_hull_plane_mesh(
+            verts[mask].astype(np.float32),
+            colors[mask].astype(np.float32),
+            world_up,
+            label,
+        )
+        if m is not None:
+            meshes.append(m)
+    return meshes
 
 
 def _pca_plane(points: np.ndarray, world_up: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
@@ -406,35 +400,6 @@ def _convex_hull_plane_mesh(
     mesh.vertex_colors = o3d.utility.Vector3dVector(color_arr)
     mesh.compute_vertex_normals()
     return mesh
-
-
-def _fill_surface_planes(
-    points: np.ndarray,
-    colors: np.ndarray,
-    world_up: np.ndarray,
-) -> list[o3d.geometry.TriangleMesh]:
-    """Split masked points into floor/ceiling groups and build convex-hull meshes.
-
-    Uses height along world_up to separate:
-      - floor  : bottom MESH_PLANE_HEIGHT_PERCENTILE %
-      - ceiling: top    MESH_PLANE_HEIGHT_PERCENTILE %
-    """
-    up = world_up.astype(np.float32)
-    up /= np.linalg.norm(up)
-    heights = points @ up
-
-    pct = MESH_PLANE_HEIGHT_PERCENTILE
-    low_cut  = float(np.percentile(heights, pct))
-    high_cut = float(np.percentile(heights, 100.0 - pct))
-    print(f"  Height range [{heights.min():.2f}, {heights.max():.2f}]  "
-          f"floor<{low_cut:.2f}  ceiling>{high_cut:.2f}")
-
-    meshes: list[o3d.geometry.TriangleMesh] = []
-    for label, mask in [("floor", heights <= low_cut), ("ceiling", heights >= high_cut)]:
-        m = _convex_hull_plane_mesh(points[mask], colors[mask], world_up, label)
-        if m is not None:
-            meshes.append(m)
-    return meshes
 
 
 # --------------------------------------------------------------------------- #
@@ -576,10 +541,6 @@ def export_mesh(
         color_type=o3d.pipelines.integration.TSDFVolumeColorType.RGB8,
     )
 
-    # Accumulate masked surface points for convex-hull plane filling
-    surface_pts_list: list[np.ndarray] = []
-    surface_col_list: list[np.ndarray] = []
-
     n_images = len(model.images)
     print(f"Rendering & integrating {n_images} views …")
 
@@ -622,16 +583,6 @@ def export_mesh(
                 image_np, gdino_processor, gdino_model, sam2_predictor, prompt_str, device
             )
             depth_masked[surface_mask] = 0.0
-
-            # Collect masked points for convex-hull plane filling
-            if MESH_FILL_PLANES:
-                c2w_np = np.linalg.inv(w2c_np)
-                pts, cols = _unproject_to_world(
-                    depth, surface_mask, rgb, c2w_np, fx, fy, cx, cy
-                )
-                if len(pts) > 0:
-                    surface_pts_list.append(pts)
-                    surface_col_list.append(cols)
 
         depth_masked[depth_masked > MESH_MAX_DEPTH] = 0.0
 
@@ -676,17 +627,14 @@ def export_mesh(
     mesh_clean = _clean_mesh(mesh)
     del mesh  # release raw mesh to avoid shared-buffer double-free
 
-    # ---- Convex-hull plane filling ----
-    if MESH_FILL_PLANES and len(surface_pts_list) > 0:
-        all_pts  = np.concatenate(surface_pts_list, axis=0)
-        all_cols = np.concatenate(surface_col_list, axis=0)
-        print(f"Building convex-hull planes from {len(all_pts):,} masked surface points …")
-
+    # ---- Convex-hull plane filling (from cleaned mesh vertices) ----
+    if MESH_FILL_PLANES:
         R_align_np = load_or_compute_gravity_rotation(sparse_dir)
         world_up   = R_align_np.T @ np.array([0.0, -1.0, 0.0], dtype=np.float32)
         world_up  /= np.linalg.norm(world_up)
 
-        plane_meshes = _fill_surface_planes(all_pts, all_cols, world_up)
+        print("Building convex-hull planes from cleaned mesh vertices …")
+        plane_meshes = _fill_planes_from_mesh(mesh_clean, world_up)
         print(f"  {len(plane_meshes)} plane(s) built")
         if plane_meshes:
             mesh_clean = _merge_meshes(mesh_clean, plane_meshes)
