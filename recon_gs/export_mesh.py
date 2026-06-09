@@ -352,13 +352,13 @@ def _make_plane_mesh(
     ).astype(np.float32)
 
     # Fan triangulation from centroid
+    # vertices: index 0 = center, indices 1..n_hull = hull vertices
     center = hull_3d.mean(axis=0, keepdims=True)  # (1, 3)
-    vertices = np.vstack([center, hull_3d])        # (K+1, 3)
+    vertices = np.vstack([center, hull_3d])        # (n_hull+1, 3)
     n_hull = len(hull_3d)
-    triangles = [
-        [0, j + 1, j % n_hull + 2] for j in range(1, n_hull)
-    ]
-    triangles.append([0, n_hull, 1])  # close the fan
+    # [0, j, j+1] for j=1..n_hull-1, then [0, n_hull, 1] to close
+    triangles = [[0, j, j + 1] for j in range(1, n_hull)]
+    triangles.append([0, n_hull, 1])
 
     mesh = o3d.geometry.TriangleMesh()
     mesh.vertices = o3d.utility.Vector3dVector(vertices)
