@@ -47,6 +47,7 @@ from recon_gs.config import (
     MESH_PLANE_MAX_PLANES,
     MESH_PLANE_PIXEL_STRIDE,
     MESH_PLANE_VOXEL_SIZE,
+    MESH_PLANE_MAX_INPUT_POINTS,
 )
 
 _GDINO_MODEL_ID = "IDEA-Research/grounding-dino-tiny"
@@ -398,14 +399,30 @@ def _fit_plane_meshes(
         if len(remaining_pts) < MESH_PLANE_MIN_POINTS:
             break
 
-        pcd = o3d.geometry.PointCloud()
-        pcd.points = o3d.utility.Vector3dVector(remaining_pts)
+        # Randomly subsample to cap RANSAC memory usage
+        if len(remaining_pts) > MESH_PLANE_MAX_INPUT_POINTS:
+            rng = np.random.default_rng(seed=plane_idx)
+            idx = rng.choice(len(remaining_pts), MESH_PLANE_MAX_INPUT_POINTS, replace=False)
+            sample_pts = remaining_pts[idx]
+            sample_col = remaining_col[idx]
+        else:
+            sample_pts = remaining_pts
+            sample_col = remaining_col
 
-        plane_model, inlier_indices = pcd.segment_plane(
+        pcd = o3d.geometry.PointCloud()
+        pcd.points = o3d.utility.Vector3dVector(sample_pts)
+
+        plane_model, inlier_indices_sample = pcd.segment_plane(
             distance_threshold=MESH_PLANE_RANSAC_DISTANCE,
             ransac_n=3,
             num_iterations=MESH_PLANE_RANSAC_ITERATIONS,
         )
+
+        # Apply the fitted plane model to the full remaining cloud to find all inliers
+        a, b, c, d = plane_model
+        dists = np.abs(remaining_pts @ np.array([a, b, c]) + d)
+        inlier_mask = dists < MESH_PLANE_RANSAC_DISTANCE
+        inlier_indices = np.where(inlier_mask)[0]
 
         n_inliers = len(inlier_indices)
         print(f"  [plane {plane_idx + 1}] {n_inliers:,} inliers  "
@@ -423,8 +440,7 @@ def _fit_plane_meshes(
             meshes.append(mesh)
 
         # Remove inliers for next iteration
-        keep = np.ones(len(remaining_pts), dtype=bool)
-        keep[inlier_indices] = False
+        keep = ~inlier_mask
         remaining_pts = remaining_pts[keep]
         remaining_col = remaining_col[keep]
 
