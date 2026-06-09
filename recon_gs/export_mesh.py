@@ -485,19 +485,81 @@ def _fit_plane_meshes(
 # --------------------------------------------------------------------------- #
 
 def _clean_mesh(mesh: o3d.geometry.TriangleMesh) -> o3d.geometry.TriangleMesh:
-    """Remove small disconnected clusters, unreferenced vertices, and degenerate triangles."""
-    import copy
+    """Remove small disconnected clusters and rebuild as an independent mesh.
 
-    tri_clusters, cluster_n_tris, _ = mesh.cluster_connected_triangles()
-    tri_clusters = np.asarray(tri_clusters)
-    cluster_n_tris = np.asarray(cluster_n_tris)
+    Avoids copy.deepcopy which shares Open3D internal buffers and causes
+    double-free crashes on destruction.
+    """
+    cc_result = mesh.cluster_connected_triangles()
+    # .copy() ensures numpy owns the data, not Open3D's internal vector
+    tri_clusters = np.array(cc_result[0])
+    cluster_n_tris = np.array(cc_result[1])
+    del cc_result
 
-    remove_mask = cluster_n_tris[tri_clusters] < MESH_MIN_CLUSTER_TRIANGLES
-    cleaned = copy.deepcopy(mesh)
-    cleaned.remove_triangles_by_mask(remove_mask)
-    cleaned.remove_unreferenced_vertices()
-    cleaned.remove_degenerate_triangles()
+    keep_mask = cluster_n_tris[tri_clusters] >= MESH_MIN_CLUSTER_TRIANGLES
+
+    all_tris = np.asarray(mesh.triangles)[keep_mask].copy()     # (K, 3)
+    all_verts = np.asarray(mesh.vertices).copy()                # (V, 3)
+    has_colors = mesh.has_vertex_colors()
+    all_colors = np.asarray(mesh.vertex_colors).copy() if has_colors else None
+
+    # Re-index vertices to remove unreferenced ones
+    used = np.unique(all_tris)
+    remap = np.full(len(all_verts), -1, dtype=np.int64)
+    remap[used] = np.arange(len(used), dtype=np.int64)
+    new_tris = remap[all_tris]
+    new_verts = all_verts[used]
+
+    # Remove degenerate triangles (any vertex index appears twice in same tri)
+    is_degenerate = (
+        (new_tris[:, 0] == new_tris[:, 1])
+        | (new_tris[:, 1] == new_tris[:, 2])
+        | (new_tris[:, 0] == new_tris[:, 2])
+    )
+    new_tris = new_tris[~is_degenerate]
+
+    cleaned = o3d.geometry.TriangleMesh()
+    cleaned.vertices = o3d.utility.Vector3dVector(new_verts)
+    cleaned.triangles = o3d.utility.Vector3iVector(new_tris)
+    if has_colors and all_colors is not None:
+        cleaned.vertex_colors = o3d.utility.Vector3dVector(all_colors[used])
+    cleaned.compute_vertex_normals()
     return cleaned
+
+
+def _merge_meshes(
+    base: o3d.geometry.TriangleMesh,
+    extras: list[o3d.geometry.TriangleMesh],
+) -> o3d.geometry.TriangleMesh:
+    """Concatenate base mesh with extra meshes via numpy; avoids += double-free."""
+    verts_list = [np.asarray(base.vertices).copy()]
+    tris_list = [np.asarray(base.triangles).copy()]
+    colors_list = [
+        np.asarray(base.vertex_colors).copy()
+        if base.has_vertex_colors()
+        else np.ones((len(verts_list[0]), 3), dtype=np.float64)
+    ]
+
+    offset = len(verts_list[0])
+    for pm in extras:
+        pm_verts = np.asarray(pm.vertices).copy()
+        pm_tris = np.asarray(pm.triangles).copy() + offset
+        pm_colors = (
+            np.asarray(pm.vertex_colors).copy()
+            if pm.has_vertex_colors()
+            else np.ones((len(pm_verts), 3), dtype=np.float64)
+        )
+        verts_list.append(pm_verts)
+        tris_list.append(pm_tris)
+        colors_list.append(pm_colors)
+        offset += len(pm_verts)
+
+    merged = o3d.geometry.TriangleMesh()
+    merged.vertices = o3d.utility.Vector3dVector(np.vstack(verts_list))
+    merged.triangles = o3d.utility.Vector3iVector(np.vstack(tris_list))
+    merged.vertex_colors = o3d.utility.Vector3dVector(np.vstack(colors_list))
+    merged.compute_vertex_normals()
+    return merged
 
 
 # --------------------------------------------------------------------------- #
@@ -658,6 +720,7 @@ def export_mesh(
 
     print("Cleaning mesh …")
     mesh_clean = _clean_mesh(mesh)
+    del mesh  # release raw mesh now to avoid shared-buffer double-free
 
     # ---- RANSAC plane filling ----
     if MESH_FILL_PLANES and len(surface_pts_list) > 0:
@@ -666,10 +729,9 @@ def export_mesh(
         print(f"Fitting planes to {len(all_pts):,} masked surface points …")
         plane_meshes = _fit_plane_meshes(all_pts, all_cols)
         print(f"  {len(plane_meshes)} plane(s) found")
-        for pm in plane_meshes:
-            mesh_clean += pm
-        if len(plane_meshes) > 0:
-            mesh_clean.compute_vertex_normals()
+        if plane_meshes:
+            mesh_clean = _merge_meshes(mesh_clean, plane_meshes)
+            del plane_meshes
 
     post_path = output_dir / "tsdf_fusion_post.ply"
     o3d.io.write_triangle_mesh(
@@ -678,4 +740,6 @@ def export_mesh(
         write_vertex_colors=True,
         write_vertex_normals=True,
     )
-    print(f"  Final mesh → {post_path}  ({len(mesh_clean.triangles):,} triangles)")
+    n_tris = len(mesh_clean.triangles)
+    del mesh_clean
+    print(f"  Final mesh → {post_path}  ({n_tris:,} triangles)")
