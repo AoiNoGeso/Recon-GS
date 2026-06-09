@@ -298,6 +298,30 @@ def _unproject_to_world(
     return pts_world.astype(np.float32), colors.astype(np.float32)
 
 
+def _pca_plane(points: np.ndarray, world_up: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Fit a plane to points via PCA (least-squares).
+
+    Returns (centroid, normal, u_axis, v_axis) all as float64 unit vectors.
+    normal is flipped to face the same half-space as world_up.
+    """
+    pts = points.astype(np.float64)
+    centroid = pts.mean(axis=0)
+    cov = (pts - centroid).T @ (pts - centroid) / len(pts)
+    _, eigvecs = np.linalg.eigh(cov)   # eigenvalues ascending → eigvecs[:, 0] = smallest
+    normal = eigvecs[:, 0]             # plane normal = min-variance direction
+
+    # Ensure normal points toward world_up (not away)
+    up = world_up.astype(np.float64)
+    if normal @ up < 0:
+        normal = -normal
+
+    # Build orthonormal tangent basis in the plane
+    ref = np.array([1.0, 0.0, 0.0]) if abs(normal[0]) < 0.9 else np.array([0.0, 1.0, 0.0])
+    u_axis = np.cross(normal, ref);  u_axis /= np.linalg.norm(u_axis)
+    v_axis = np.cross(normal, u_axis)
+    return centroid, normal, u_axis, v_axis
+
+
 def _convex_hull_plane_mesh(
     points: np.ndarray,
     colors: np.ndarray,
@@ -308,10 +332,9 @@ def _convex_hull_plane_mesh(
 
     Steps:
       1. Voxel-downsample the point group.
-      2. Compute each point's height along world_up.
-      3. Place the plane at the median height.
-      4. Project all points onto this horizontal plane.
-      5. Compute 2D convex hull; triangulate as a fan from the centroid.
+      2. Fit a best-fit plane via PCA (handles tilted floors/ceilings).
+      3. Project all points onto that plane.
+      4. Compute 2D convex hull; triangulate as a fan from the centroid.
 
     Returns a TriangleMesh, or None if the group has too few points.
     """
@@ -335,20 +358,19 @@ def _convex_hull_plane_mesh(
         print(f"  [{label}] too few points after downsampling, skipped")
         return None
 
-    # Build orthonormal basis {u_axis, v_axis} in the plane perpendicular to world_up
-    up = world_up.astype(np.float64)
-    up /= np.linalg.norm(up)
-    ref = np.array([1.0, 0.0, 0.0]) if abs(up[0]) < 0.9 else np.array([0.0, 1.0, 0.0])
-    u_axis = np.cross(up, ref);  u_axis /= np.linalg.norm(u_axis)
-    v_axis = np.cross(up, u_axis)
+    # PCA plane fit: handles tilted surfaces
+    centroid, normal, u_axis, v_axis = _pca_plane(pts, world_up)
+    tilt_deg = float(np.degrees(np.arccos(np.clip(abs(normal @ world_up.astype(np.float64)), 0, 1))))
+    print(f"  [{label}] PCA plane normal=({normal[0]:.2f},{normal[1]:.2f},{normal[2]:.2f})  "
+          f"tilt={tilt_deg:.1f}°")
 
-    # Height of each point along world_up
-    heights = pts.astype(np.float64) @ up
-    plane_height = float(np.median(heights))
-
-    # Project to 2D
+    # Project points onto the fitted plane (along normal direction)
     pts_f64 = pts.astype(np.float64)
-    pts_2d = np.stack([pts_f64 @ u_axis, pts_f64 @ v_axis], axis=1)
+    dists = (pts_f64 - centroid) @ normal           # signed distance to plane
+    projected = pts_f64 - np.outer(dists, normal)   # (N, 3) on the plane
+
+    # 2D coordinates in the plane's local frame
+    pts_2d = np.stack([projected @ u_axis, projected @ v_axis], axis=1)
 
     try:
         hull = ConvexHull(pts_2d)
@@ -358,14 +380,15 @@ def _convex_hull_plane_mesh(
 
     hull_2d = pts_2d[hull.vertices]   # (K, 2)
     n_hull = len(hull_2d)
-    print(f"  [{label}] convex hull: {n_hull} vertices, plane height={plane_height:.3f}")
+    print(f"  [{label}] convex hull: {n_hull} vertices")
 
-    # Reconstruct 3D hull vertices on the plane
-    # p = s*u_axis + t*v_axis + plane_height*up
+    # Reconstruct 3D hull vertices on the fitted plane
+    # p = centroid + s*u_axis + t*v_axis
+    # (component along normal is zero since we project back onto the plane through centroid)
     hull_3d = (
-        hull_2d[:, 0:1] * u_axis
+        centroid
+        + hull_2d[:, 0:1] * u_axis
         + hull_2d[:, 1:2] * v_axis
-        + plane_height * up
     ).astype(np.float32)
 
     # Fan triangulation: center + hull ring
