@@ -48,8 +48,8 @@ MAX_GAUSSIANS: int = 300_000  # safety cap
 # --------------------------------------------------------------------------- #
 
 # TSDF volume parameters
-MESH_VOXEL_SIZE: float = 0.05          # voxel size [m]; smaller = finer mesh
-MESH_MAX_DEPTH: float = 8.0            # depth cutoff [m]; set to scene diagonal
+MESH_VOXEL_SIZE: float = 0.05  # voxel size [m]; smaller = finer mesh
+MESH_MAX_DEPTH: float = 8.0  # depth cutoff [m]; set to scene diagonal
 MESH_MIN_CLUSTER_TRIANGLES: int = 500  # remove isolated clusters below this size
 
 # --------------------------------------------------------------------------- #
@@ -58,10 +58,10 @@ MESH_MIN_CLUSTER_TRIANGLES: int = 500  # remove isolated clusters below this siz
 # Set each flag to True to exclude that surface from TSDF integration.
 # Prompts are passed to GroundingDINO; SAM2 refines the detected regions.
 
-MESH_MASK_FLOOR: bool = True     # indoor floor
-MESH_MASK_CEILING: bool = True   # indoor ceiling
-MESH_MASK_GROUND: bool = False   # outdoor ground / road
-MESH_MASK_SKY: bool = False      # outdoor sky
+MESH_MASK_FLOOR: bool = True  # indoor floor
+MESH_MASK_CEILING: bool = True  # indoor ceiling
+MESH_MASK_GROUND: bool = False  # outdoor ground / road
+MESH_MASK_SKY: bool = False  # outdoor sky
 
 MESH_FLOOR_PROMPTS: list[str] = ["floor", "carpet", "tile floor", "wooden floor", "rug"]
 MESH_CEILING_PROMPTS: list[str] = ["ceiling"]
@@ -76,11 +76,14 @@ MESH_GDINO_TEXT_THRESHOLD: float = 0.20
 # RANSAC plane filling
 # Replace excluded surface regions with fitted flat planes.
 # --------------------------------------------------------------------------- #
-MESH_FILL_PLANES: bool = True              # enable/disable plane filling
+MESH_FILL_PLANES: bool = True  # enable/disable plane filling
 MESH_PLANE_RANSAC_DISTANCE: float = 0.05  # inlier distance threshold [m]
 MESH_PLANE_RANSAC_ITERATIONS: int = 1000  # RANSAC iterations
-MESH_PLANE_MIN_POINTS: int = 500          # skip plane if fewer masked points remain
-MESH_PLANE_MAX_PLANES: int = 4            # max planes to extract (iterative RANSAC)
-MESH_PLANE_PIXEL_STRIDE: int = 8          # collect every N-th masked pixel per frame
-MESH_PLANE_VOXEL_SIZE: float = 0.05       # voxel size for downsampling before RANSAC [m]
-MESH_PLANE_MAX_INPUT_POINTS: int = 50_000 # random subsample cap fed into segment_plane
+MESH_PLANE_MIN_POINTS: int = 500  # skip plane if fewer masked points remain
+MESH_PLANE_MAX_PLANES: int = 4  # max planes to extract (iterative RANSAC)
+MESH_PLANE_PIXEL_STRIDE: int = 8  # collect every N-th masked pixel per frame
+MESH_PLANE_VOXEL_SIZE: float = 0.05  # voxel size for downsampling before RANSAC [m]
+MESH_PLANE_MAX_INPUT_POINTS: int = 50_000  # random subsample cap fed into segment_plane
+# Minimum |cos θ| between fitted plane normal and world-up to accept as floor/ceiling.
+# cos(45°)≈0.71; walls have small values (~0), floors/ceilings have large values (~1).
+MESH_PLANE_MIN_VERTICAL_ALIGNMENT: float = 0.7

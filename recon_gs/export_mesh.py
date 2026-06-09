@@ -48,6 +48,7 @@ from recon_gs.config import (
     MESH_PLANE_PIXEL_STRIDE,
     MESH_PLANE_VOXEL_SIZE,
     MESH_PLANE_MAX_INPUT_POINTS,
+    MESH_PLANE_MIN_VERTICAL_ALIGNMENT,
 )
 
 _GDINO_MODEL_ID = "IDEA-Research/grounding-dino-tiny"
@@ -415,9 +416,11 @@ def _ransac_plane_numpy(
 def _fit_plane_meshes(
     points: np.ndarray,
     colors: np.ndarray,
+    world_up: np.ndarray,
 ) -> list[o3d.geometry.TriangleMesh]:
     """Iteratively extract planes from a masked point cloud via RANSAC.
 
+    Only keeps planes whose normal aligns with world_up (floor/ceiling).
     Uses pure numpy RANSAC to avoid Open3D segment_plane heap corruption bugs.
     """
     # Voxel downsample via Open3D (stable; only segment_plane triggers the bug)
@@ -455,14 +458,27 @@ def _fit_plane_meshes(
         if plane_model is None:
             break
 
-        # Re-evaluate inliers on the full remaining cloud
+        # Check that the plane normal aligns with world-up (floor/ceiling, not wall)
         a, b, c, d = plane_model
+        normal_vec = np.array([a, b, c], dtype=np.float64)
+        alignment = float(abs(normal_vec @ world_up.astype(np.float64)))
+
+        # Re-evaluate inliers on the full remaining cloud
         dists = np.abs(remaining_pts @ np.array([a, b, c], dtype=np.float32) + d)
         inlier_mask = dists < MESH_PLANE_RANSAC_DISTANCE
         n_inliers = int(inlier_mask.sum())
 
         print(f"  [plane {plane_idx + 1}] {n_inliers:,} inliers  "
-              f"model=({a:.2f}, {b:.2f}, {c:.2f}, {d:.2f})")
+              f"model=({a:.2f}, {b:.2f}, {c:.2f}, {d:.2f})  "
+              f"vertical_alignment={alignment:.2f}")
+
+        if alignment < MESH_PLANE_MIN_VERTICAL_ALIGNMENT:
+            print(f"    → skipped (not floor/ceiling, alignment {alignment:.2f} "
+                  f"< threshold {MESH_PLANE_MIN_VERTICAL_ALIGNMENT})")
+            # Still remove inliers so next iteration finds a different plane
+            remaining_pts = remaining_pts[~inlier_mask]
+            remaining_col = remaining_col[~inlier_mask]
+            continue
 
         if n_inliers < MESH_PLANE_MIN_POINTS:
             break
@@ -726,8 +742,13 @@ def export_mesh(
     if MESH_FILL_PLANES and len(surface_pts_list) > 0:
         all_pts = np.concatenate(surface_pts_list, axis=0)
         all_cols = np.concatenate(surface_col_list, axis=0)
+        # World-up in unaligned COLMAP space: R_align^T @ [0,-1,0]
+        R_align_np = load_or_compute_gravity_rotation(sparse_dir)
+        world_up = R_align_np.T @ np.array([0.0, -1.0, 0.0], dtype=np.float32)
+        world_up /= np.linalg.norm(world_up)
+
         print(f"Fitting planes to {len(all_pts):,} masked surface points …")
-        plane_meshes = _fit_plane_meshes(all_pts, all_cols)
+        plane_meshes = _fit_plane_meshes(all_pts, all_cols, world_up=world_up)
         print(f"  {len(plane_meshes)} plane(s) found")
         if plane_meshes:
             mesh_clean = _merge_meshes(mesh_clean, plane_meshes)
