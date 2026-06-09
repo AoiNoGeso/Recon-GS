@@ -71,3 +71,15 @@ MESH_SKY_PROMPTS: list[str] = ["sky"]
 # GroundingDINO thresholds for surface masking (can differ from dynamic-object masking)
 MESH_GDINO_BOX_THRESHOLD: float = 0.25
 MESH_GDINO_TEXT_THRESHOLD: float = 0.20
+
+# --------------------------------------------------------------------------- #
+# Convex-hull plane filling
+# Replace excluded surface regions with convex-hull flat planes.
+# --------------------------------------------------------------------------- #
+MESH_FILL_PLANES: bool = True             # enable/disable plane filling
+MESH_PLANE_PIXEL_STRIDE: int = 8          # collect every N-th masked pixel per frame
+MESH_PLANE_VOXEL_SIZE: float = 0.05       # voxel downsampling before hull [m]
+MESH_PLANE_MIN_POINTS: int = 100          # skip surface if fewer points remain
+# Height percentile to separate floor/ceiling groups along world-up axis.
+# Bottom MESH_PLANE_HEIGHT_PERCENTILE % → floor; top % → ceiling.
+MESH_PLANE_HEIGHT_PERCENTILE: float = 20.0

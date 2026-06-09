@@ -113,6 +113,18 @@ Grounded-SAM2 (GroundingDINO + SAM2) でサーフェス領域を検出し、TSDF
 | `MESH_GDINO_BOX_THRESHOLD` | 0.25 | GroundingDINO ボックス信頼度閾値 |
 | `MESH_GDINO_TEXT_THRESHOLD` | 0.20 | GroundingDINO テキスト一致閾値 |
 
+### 凸包投影による平面補完
+
+マスクして除外した床・天井領域を平面メッシュで補完します。
+
+| 定数 | デフォルト | 説明 |
+|------|-----------|------|
+| `MESH_FILL_PLANES` | True | 平面補完の有効/無効 |
+| `MESH_PLANE_PIXEL_STRIDE` | 8 | 収集時のピクセルサブサンプリング間隔 |
+| `MESH_PLANE_VOXEL_SIZE` | 0.05 | 凸包前のボクセルダウンサンプリング [m] |
+| `MESH_PLANE_MIN_POINTS` | 100 | 平面生成に必要な最小点数 |
+| `MESH_PLANE_HEIGHT_PERCENTILE` | 20.0 | 床/天井分割の高さパーセンタイル |
+
 > **Note**: 別のシーンで再実行する場合は `colmap/sparse/0/gravity_rotation.json` を削除してください（重力アライメントキャッシュのリセット）。
 
 ## 技術的な詳細
@@ -125,6 +137,8 @@ COLMAP の再構成は重力方向が保証されないため、全カメラの 
 ### メッシュ生成 (`recon_gs/export_mesh.py`)
 
 1. 学習済みガウシアンから各訓練カメラの RGB・深度をレンダリング
-2. Grounded-SAM2 (GroundingDINO + SAM2) でサーフェス領域（床・天井など）をプロンプトベースで検出しマスク
+2. Grounded-SAM2 (GroundingDINO + SAM2) でサーフェス領域（床・天井など）をプロンプトベースで検出しマスク  
+   マスク領域の深度ピクセルを 3D 点群として収集（平面補完用）
 3. Open3D の ScalableTSDFVolume で深度フレームを統合
-4. 孤立クラスタ・縮退三角形を除去して出力
+4. 孤立クラスタ・縮退三角形を除去
+5. 収集点群を world_up 方向の高さで床・天井に分割 → 各グループに凸包投影で平面メッシュを生成して結合
