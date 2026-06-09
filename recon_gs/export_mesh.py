@@ -366,47 +366,102 @@ def _ransac_plane_numpy(
     return best_model, best_mask
 
 
-def _fit_one_plane(
-    points: np.ndarray,
-    colors: np.ndarray,
+def _make_horizontal_plane_mesh(
+    all_verts: np.ndarray,
+    all_colors: np.ndarray,
+    world_up: np.ndarray,
+    plane_height: float,
     label: str,
-    seed: int = 0,
 ) -> o3d.geometry.TriangleMesh | None:
-    """Run RANSAC on a pre-filtered point group and return a plane mesh."""
-    if len(points) < MESH_PLANE_MIN_POINTS:
-        print(f"  [{label}] too few points ({len(points):,}), skipped")
-        return None
+    """Build a horizontal plane mesh at a fixed height along world_up.
 
-    # Subsample to cap RANSAC cost
-    if len(points) > MESH_PLANE_MAX_INPUT_POINTS:
-        rng = np.random.default_rng(seed=seed)
-        idx = rng.choice(len(points), MESH_PLANE_MAX_INPUT_POINTS, replace=False)
-        sample = points[idx]
+    Uses RANSAC to refine which vertices near the target height are true
+    inliers, then builds a convex hull of all mesh vertices projected down
+    onto that plane for full area coverage.
+
+    Args:
+        all_verts    : (V, 3) all cleaned mesh vertices (for hull extent)
+        all_colors   : (V, 3) corresponding colors
+        world_up     : unit vector pointing up in COLMAP world space
+        plane_height : target height value (verts @ world_up ≈ plane_height)
+        label        : "floor" or "ceiling" for logging
+    """
+    from scipy.spatial import ConvexHull
+
+    up = world_up.astype(np.float64)
+    up /= np.linalg.norm(up)
+
+    # Refine height with RANSAC on vertices near the target height
+    heights = all_verts @ up
+    band = MESH_PLANE_RANSAC_DISTANCE * 3.0
+    near_mask = np.abs(heights - plane_height) < band
+    near_pts = all_verts[near_mask].astype(np.float64)
+
+    if len(near_pts) >= MESH_PLANE_MIN_POINTS:
+        # Subsample for RANSAC cost
+        if len(near_pts) > MESH_PLANE_MAX_INPUT_POINTS:
+            rng = np.random.default_rng(0)
+            idx = rng.choice(len(near_pts), MESH_PLANE_MAX_INPUT_POINTS, replace=False)
+            sample = near_pts[idx]
+        else:
+            sample = near_pts
+
+        plane_model, inlier_mask_near = _ransac_plane_numpy(
+            sample.astype(np.float32),
+            distance_threshold=MESH_PLANE_RANSAC_DISTANCE,
+            n_iterations=MESH_PLANE_RANSAC_ITERATIONS,
+        )
+        if plane_model is not None:
+            a, b, c, d = plane_model
+            fitted_normal = np.array([a, b, c], dtype=np.float64)
+            alignment = abs(float(fitted_normal @ up))
+            if alignment >= 0.7:
+                # Accept refined normal only if it's sufficiently horizontal
+                up = fitted_normal if fitted_normal @ up > 0 else -fitted_normal
+                plane_height = float(-d)
+                print(f"  [{label}] RANSAC refined height={plane_height:.3f}  alignment={alignment:.2f}")
+            else:
+                print(f"  [{label}] RANSAC found non-horizontal plane (alignment={alignment:.2f}), using forced height")
     else:
-        sample = points
+        print(f"  [{label}] too few near-plane vertices ({near_mask.sum():,}), using forced height={plane_height:.3f}")
 
-    plane_model, _ = _ransac_plane_numpy(
-        sample,
-        distance_threshold=MESH_PLANE_RANSAC_DISTANCE,
-        n_iterations=MESH_PLANE_RANSAC_ITERATIONS,
-        seed=seed,
+    # Project ALL mesh vertices onto the plane and build convex hull for area coverage
+    d_plane = -plane_height  # plane eq: up·x + d_plane = 0
+    ref = np.array([1.0, 0.0, 0.0]) if abs(up[0]) < 0.9 else np.array([0.0, 1.0, 0.0])
+    u_axis = np.cross(up, ref); u_axis /= np.linalg.norm(u_axis)
+    v_axis = np.cross(up, u_axis)
+
+    pts_2d = np.stack([all_verts @ u_axis, all_verts @ v_axis], axis=1)
+    try:
+        hull = ConvexHull(pts_2d)
+    except Exception:
+        print(f"  [{label}] convex hull failed")
+        return None
+
+    hull_2d = pts_2d[hull.vertices]
+    hull_3d = (
+        hull_2d[:, 0:1] * u_axis
+        + hull_2d[:, 1:2] * v_axis
+        + plane_height * up
+    ).astype(np.float32)
+
+    center = hull_3d.mean(axis=0, keepdims=True)
+    vertices = np.vstack([center, hull_3d])
+    n_hull = len(hull_3d)
+    triangles = [[0, j, j + 1] for j in range(1, n_hull)]
+    triangles.append([0, n_hull, 1])
+
+    avg_color = all_colors[near_mask].mean(axis=0) if near_mask.any() else all_colors.mean(axis=0)
+
+    mesh = o3d.geometry.TriangleMesh()
+    mesh.vertices = o3d.utility.Vector3dVector(vertices)
+    mesh.triangles = o3d.utility.Vector3iVector(triangles)
+    mesh.vertex_colors = o3d.utility.Vector3dVector(
+        np.tile(avg_color.astype(np.float64), (len(vertices), 1))
     )
-    if plane_model is None:
-        print(f"  [{label}] RANSAC failed")
-        return None
-
-    a, b, c, d = plane_model
-    dists = np.abs(points @ np.array([a, b, c], dtype=np.float32) + d)
-    inlier_mask = dists < MESH_PLANE_RANSAC_DISTANCE
-    n_inliers = int(inlier_mask.sum())
-    print(f"  [{label}] {n_inliers:,} inliers  model=({a:.2f}, {b:.2f}, {c:.2f}, {d:.2f})")
-
-    if n_inliers < MESH_PLANE_MIN_POINTS:
-        print(f"  [{label}] too few inliers, skipped")
-        return None
-
-    avg_color = colors[inlier_mask].mean(axis=0)
-    return _make_plane_mesh(points[inlier_mask], plane_model, avg_color)
+    mesh.compute_vertex_normals()
+    print(f"  [{label}] plane built  height={plane_height:.3f}  hull_verts={n_hull}")
+    return mesh
 
 
 def _fill_planes_from_mesh(
@@ -415,9 +470,11 @@ def _fill_planes_from_mesh(
 ) -> list[o3d.geometry.TriangleMesh]:
     """Fit floor and ceiling planes using vertices from the cleaned mesh.
 
-    Extracts bottom/top MESH_PLANE_HEIGHT_PERCENTILE % of vertices along
-    world_up, then runs RANSAC on each group to build a plane mesh.
-    Using cleaned mesh vertices avoids noise from raw depth data.
+    Determines floor/ceiling height from the global min/max of vertex heights
+    along world_up, then builds a horizontal plane mesh at each target height.
+    Using global extremes (not percentile subsets) is robust even when the
+    masked surface (e.g. floor) is absent from the cleaned mesh — wall bases
+    still indicate the correct floor height.
     """
     verts = np.asarray(mesh_clean.vertices).copy()
     colors = (
@@ -426,29 +483,26 @@ def _fill_planes_from_mesh(
         else np.ones((len(verts), 3), dtype=np.float32)
     )
 
-    up = world_up.astype(np.float32)
+    up = world_up.astype(np.float64)
     up /= np.linalg.norm(up)
     heights = verts @ up
 
-    pct = MESH_PLANE_HEIGHT_PERCENTILE
-    low_cut = float(np.percentile(heights, pct))
-    high_cut = float(np.percentile(heights, 100.0 - pct))
-    print(f"  Mesh height range [{heights.min():.2f}, {heights.max():.2f}]  "
-          f"floor≤{low_cut:.2f}  ceiling≥{high_cut:.2f}")
+    floor_h = float(np.percentile(heights, 1.0))   # near-minimum = floor level
+    ceil_h  = float(np.percentile(heights, 99.0))  # near-maximum = ceiling level
+    print(f"  Mesh height range [{heights.min():.3f}, {heights.max():.3f}]  "
+          f"floor≈{floor_h:.3f}  ceiling≈{ceil_h:.3f}")
 
     candidates = []
     if MESH_MASK_FLOOR or MESH_MASK_GROUND:
-        candidates.append(("floor", heights <= low_cut, 0))
+        candidates.append(("floor", floor_h))
     if MESH_MASK_CEILING or MESH_MASK_SKY:
-        candidates.append(("ceiling", heights >= high_cut, 1))
+        candidates.append(("ceiling", ceil_h))
 
     meshes: list[o3d.geometry.TriangleMesh] = []
-    for label, mask, seed in candidates:
-        pts_group = verts[mask].astype(np.float32)
-        col_group = colors[mask].astype(np.float32)
-        mesh = _fit_one_plane(pts_group, col_group, label=label, seed=seed)
-        if mesh is not None:
-            meshes.append(mesh)
+    for label, target_h in candidates:
+        m = _make_horizontal_plane_mesh(verts, colors, up, target_h, label)
+        if m is not None:
+            meshes.append(m)
 
     return meshes
 
