@@ -59,7 +59,7 @@ MESH_MIN_CLUSTER_TRIANGLES: int = 500  # remove isolated clusters below this siz
 # Prompts are passed to GroundingDINO; SAM2 refines the detected regions.
 
 MESH_MASK_FLOOR: bool = True  # indoor floor
-MESH_MASK_CEILING: bool = True  # indoor ceiling
+MESH_MASK_CEILING: bool = False  # indoor ceiling
 MESH_MASK_GROUND: bool = False  # outdoor ground / road
 MESH_MASK_SKY: bool = False  # outdoor sky
 
@@ -79,7 +79,7 @@ MESH_GDINO_TEXT_THRESHOLD: float = 0.20
 MESH_FILL_PLANES: bool = True  # enable/disable plane filling
 MESH_PLANE_RANSAC_DISTANCE: float = 0.05  # inlier distance threshold [m]
 MESH_PLANE_RANSAC_ITERATIONS: int = 1000  # RANSAC iterations
-MESH_PLANE_MIN_POINTS: int = 500  # skip plane if fewer masked points remain
+MESH_PLANE_MIN_POINTS: int = 500          # skip plane if fewer masked points remain
 MESH_PLANE_PIXEL_STRIDE: int = 8          # collect every N-th masked pixel per frame
 MESH_PLANE_VOXEL_SIZE: float = 0.05       # voxel size for downsampling before RANSAC [m]
 MESH_PLANE_MAX_INPUT_POINTS: int = 50_000 # random subsample cap fed into RANSAC
