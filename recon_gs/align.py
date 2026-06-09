@@ -72,8 +72,9 @@ def _compute_from_cameras(sparse_dir: Path) -> np.ndarray:
     avg_up = np.mean(up_vectors, axis=0)
     avg_up /= np.linalg.norm(avg_up)
 
-    # Rotate avg_up → [0, 1, 0]  (Y-up convention)
-    target = np.array([0.0, 1.0, 0.0], dtype=np.float64)
+    # COLMAPはOpenCV規約でY軸が下向き → カメラのup方向は世界座標で [0,-1,0] になるのが正常
+    # avg_up を [0,-1,0] に揃えることで、傾き(roll)のみを補正し上下反転を起こさない
+    target = np.array([0.0, -1.0, 0.0], dtype=np.float64)
     return _rotation_between(avg_up, target).astype(np.float32)
 
 
