@@ -626,13 +626,23 @@ def export_mesh(
     mesh_clean = _clean_mesh(mesh)
     del mesh  # release raw mesh now to avoid shared-buffer double-free
 
-    # ---- RANSAC plane filling from cleaned mesh vertices ----
-    if MESH_FILL_PLANES:
-        R_align_np = load_or_compute_gravity_rotation(sparse_dir)
-        world_up = R_align_np.T @ np.array([0.0, -1.0, 0.0], dtype=np.float32)
-        world_up /= np.linalg.norm(world_up)
+    # ---- Gravity alignment ----
+    # The TSDF was integrated using raw COLMAP poses (no R_align applied),
+    # so the mesh is in raw COLMAP world space.  Apply R_align here so the
+    # mesh shares the same coordinate frame as the trained Gaussians.
+    R_align_np = load_or_compute_gravity_rotation(sparse_dir)
+    print("Applying gravity alignment to mesh …")
+    verts_raw = np.asarray(mesh_clean.vertices).copy()
+    verts_aligned = (R_align_np @ verts_raw.T).T
+    mesh_clean.vertices = o3d.utility.Vector3dVector(verts_aligned)
+    mesh_clean.compute_vertex_normals()
 
-        print("Building RANSAC planes from cleaned mesh vertices …")
+    # ---- Plane filling from cleaned (now aligned) mesh vertices ----
+    if MESH_FILL_PLANES:
+        # After R_align is applied, "up" is always [0, -1, 0] (COLMAP: camera Y = down)
+        world_up = np.array([0.0, -1.0, 0.0], dtype=np.float64)
+
+        print("Building planes from cleaned mesh vertices …")
         plane_meshes = _fill_planes_from_mesh(mesh_clean, world_up)
         print(f"  {len(plane_meshes)} plane(s) built")
         if plane_meshes:
