@@ -626,21 +626,23 @@ def export_mesh(
     mesh_clean = _clean_mesh(mesh)
     del mesh  # release raw mesh now to avoid shared-buffer double-free
 
-    # ---- Gravity alignment ----
+    # ---- Gravity alignment + Isaac Sim convention ----
     # The TSDF was integrated using raw COLMAP poses (no R_align applied),
-    # so the mesh is in raw COLMAP world space.  Apply R_align here so the
-    # mesh shares the same coordinate frame as the trained Gaussians.
+    # so the mesh is in raw COLMAP world space.  Apply R_align then a 180°
+    # rotation around X (R_x180 = diag(1,-1,-1)) to match the GS .ply output.
     R_align_np = load_or_compute_gravity_rotation(sparse_dir)
-    print("Applying gravity alignment to mesh …")
+    R_x180 = np.diag([1.0, -1.0, -1.0])
+    R_total = R_x180 @ R_align_np
+    print("Applying gravity alignment + X180 rotation to mesh …")
     verts_raw = np.asarray(mesh_clean.vertices).copy()
-    verts_aligned = (R_align_np @ verts_raw.T).T
-    mesh_clean.vertices = o3d.utility.Vector3dVector(verts_aligned)
+    mesh_clean.vertices = o3d.utility.Vector3dVector((R_total @ verts_raw.T).T)
     mesh_clean.compute_vertex_normals()
 
     # ---- Plane filling from cleaned (now aligned) mesh vertices ----
     if MESH_FILL_PLANES:
-        # After R_align is applied, "up" is always [0, -1, 0] (COLMAP: camera Y = down)
-        world_up = np.array([0.0, -1.0, 0.0], dtype=np.float64)
+        # After R_align + R_x180, "up" becomes [0, +1, 0]
+        # (R_x180 flips Y: [0,-1,0] → [0,+1,0])
+        world_up = np.array([0.0, 1.0, 0.0], dtype=np.float64)
 
         print("Building planes from cleaned mesh vertices …")
         plane_meshes = _fill_planes_from_mesh(mesh_clean, world_up)

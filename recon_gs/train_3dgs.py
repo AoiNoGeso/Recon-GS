@@ -223,6 +223,17 @@ def _export_ply(
         ("rot_0", "f4"), ("rot_1", "f4"), ("rot_2", "f4"), ("rot_3", "f4"),
     ]
     arr = np.empty(n, dtype=dtype)
+    # Apply 180° rotation around X axis for Isaac Sim convention.
+    # R_x180 = diag(1, -1, -1): x unchanged, y and z negated.
+    means = means.copy()
+    means[:, 1] *= -1
+    means[:, 2] *= -1
+    # Compose quaternion with q_x180=[w=0,x=1,y=0,z=0]:
+    # [w,x,y,z]_new = [-x, w, -z, y]
+    quats = quats.copy()
+    w, x, y, z = quats[:, 0].copy(), quats[:, 1].copy(), quats[:, 2].copy(), quats[:, 3].copy()
+    quats[:, 0], quats[:, 1], quats[:, 2], quats[:, 3] = -x, w, -z, y
+
     arr["x"], arr["y"], arr["z"] = means[:, 0], means[:, 1], means[:, 2]
     arr["nx"] = arr["ny"] = arr["nz"] = 0.0
     arr["f_dc_0"], arr["f_dc_1"], arr["f_dc_2"] = sh_dc[:, 0], sh_dc[:, 1], sh_dc[:, 2]
