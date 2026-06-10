@@ -113,7 +113,7 @@ def pipeline(
     if resume and _is_done(output, "mask"):
         console.print("[dim]  [skip] dynamic masking[/dim]")
     else:
-        console.print(Panel("Step 2 / 4 — Mask dynamic objects", style="bold blue"))
+        console.print(Panel("Step 2 / 5 — Mask dynamic objects", style="bold blue"))
         from recon_gs.mask_dynamic import mask_frames
         mask_frames(frames_dir, masks_dir)
         console.print(f"  Masks saved → {masks_dir}")
@@ -125,7 +125,7 @@ def pipeline(
     if resume and _is_done(output, "sfm"):
         console.print("[dim]  [skip] SfM[/dim]")
     else:
-        console.print(Panel("Step 3 / 4 — Camera pose estimation (hloc + COLMAP)", style="bold blue"))
+        console.print(Panel("Step 3 / 5 — Camera pose estimation (hloc + COLMAP)", style="bold blue"))
         from recon_gs.run_sfm import run_sfm
         model = run_sfm(frames_dir, masks_dir, colmap_dir)
         console.print(f"  Registered {len(model.images)} images, {len(model.points3D)} 3D points")
@@ -137,7 +137,7 @@ def pipeline(
     if resume and _is_done(output, "train"):
         console.print("[dim]  [skip] 3DGS training[/dim]")
     else:
-        console.print(Panel("Step 4 / 4 — 3DGS training (gsplat)", style="bold blue"))
+        console.print(Panel("Step 4 / 5 — 3DGS training (gsplat)", style="bold blue"))
         from recon_gs.train_3dgs import train_3dgs
         train_3dgs(colmap_dir, frames_dir, masks_dir, ply_path)
         _mark_done(output, "train")
