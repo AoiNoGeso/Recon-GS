@@ -626,23 +626,20 @@ def export_mesh(
     mesh_clean = _clean_mesh(mesh)
     del mesh  # release raw mesh now to avoid shared-buffer double-free
 
-    # ---- Gravity alignment + Isaac Sim convention ----
+    # ---- Gravity alignment ----
     # The TSDF was integrated using raw COLMAP poses (no R_align applied),
-    # so the mesh is in raw COLMAP world space.  Apply R_align then a 180°
-    # rotation around X (R_x180 = diag(1,-1,-1)) to match the GS .ply output.
+    # so the mesh is in raw COLMAP world space.  Apply R_align here so the
+    # mesh shares the same coordinate frame as the trained Gaussians.
     R_align_np = load_or_compute_gravity_rotation(sparse_dir)
-    R_x180 = np.diag([1.0, -1.0, -1.0])
-    R_total = R_x180 @ R_align_np
-    print("Applying gravity alignment + X180 rotation to mesh …")
+    print("Applying gravity alignment to mesh …")
     verts_raw = np.asarray(mesh_clean.vertices).copy()
-    mesh_clean.vertices = o3d.utility.Vector3dVector((R_total @ verts_raw.T).T)
+    mesh_clean.vertices = o3d.utility.Vector3dVector((R_align_np @ verts_raw.T).T)
     mesh_clean.compute_vertex_normals()
 
     # ---- Plane filling from cleaned (now aligned) mesh vertices ----
     if MESH_FILL_PLANES:
-        # After R_align + R_x180, "up" becomes [0, +1, 0]
-        # (R_x180 flips Y: [0,-1,0] → [0,+1,0])
-        world_up = np.array([0.0, 1.0, 0.0], dtype=np.float64)
+        # After R_align is applied, "up" is [0, -1, 0] (COLMAP: camera Y = down)
+        world_up = np.array([0.0, -1.0, 0.0], dtype=np.float64)
 
         print("Building planes from cleaned mesh vertices …")
         plane_meshes = _fill_planes_from_mesh(mesh_clean, world_up)
@@ -650,6 +647,16 @@ def export_mesh(
         if plane_meshes:
             mesh_clean = _merge_meshes(mesh_clean, plane_meshes)
             del plane_meshes
+
+    # ---- Isaac Sim convention: 180° rotation around X axis ----
+    # R_x180 = diag(1, -1, -1): x unchanged, y and z negated.
+    # Applied after all plane generation so the plane fitting is unaffected.
+    print("Applying X180 rotation for Isaac Sim …")
+    verts_final = np.asarray(mesh_clean.vertices).copy()
+    verts_final[:, 1] *= -1
+    verts_final[:, 2] *= -1
+    mesh_clean.vertices = o3d.utility.Vector3dVector(verts_final)
+    mesh_clean.compute_vertex_normals()
 
     post_path = output_dir / "tsdf_fusion_post.ply"
     o3d.io.write_triangle_mesh(
