@@ -37,13 +37,13 @@ uv sync --python 3.12
 
 ```bash
 # フルパイプライン実行
-uv run recon-gs pipeline --video input.mp4 --output output/
+uv run recon-gs --video input.mp4 --output output/
 
 # 途中から再開（完了済みステップをスキップ）
-uv run recon-gs pipeline --video input.mp4 --output output/ --resume
+uv run recon-gs --video input.mp4 --output output/ --resume
 
 # 特定ステップから再実行
-uv run recon-gs pipeline --video input.mp4 --output output/ --from-step mesh
+uv run recon-gs --video input.mp4 --output output/ --from-step mesh
 # steps: extract | mask | sfm | train | mesh
 ```
 
@@ -113,6 +113,18 @@ Grounded-SAM2 (GroundingDINO + SAM2) でサーフェス領域を検出し、TSDF
 | `MESH_GDINO_BOX_THRESHOLD` | 0.25 | GroundingDINO ボックス信頼度閾値 |
 | `MESH_GDINO_TEXT_THRESHOLD` | 0.20 | GroundingDINO テキスト一致閾値 |
 
+### 平面補完
+
+マスクして除外した床・天井領域をクリーン済みメッシュ頂点から平面メッシュで補完します。  
+クリーン後のメッシュ頂点を高さで分割し、PCA で最適な平面法線を推定します（傾斜床対応）。
+
+| 定数 | デフォルト | 説明 |
+|------|-----------|------|
+| `MESH_FILL_PLANES` | True | 平面補完の有効/無効 |
+| `MESH_PLANE_MIN_POINTS` | 500 | 平面推定に必要な最小点数 |
+| `MESH_PLANE_MAX_INPUT_POINTS` | 50,000 | PCA 前のサブサンプリング上限 |
+| `MESH_PLANE_HEIGHT_PERCENTILE` | 10.0 | 床/天井候補頂点の抽出パーセンタイル |
+
 > **Note**: 別のシーンで再実行する場合は `colmap/sparse/0/gravity_rotation.json` を削除してください（重力アライメントキャッシュのリセット）。
 
 ## 技術的な詳細
@@ -127,4 +139,6 @@ COLMAP の再構成は重力方向が保証されないため、全カメラの 
 1. 学習済みガウシアンから各訓練カメラの RGB・深度をレンダリング
 2. Grounded-SAM2 (GroundingDINO + SAM2) でサーフェス領域（床・天井など）をプロンプトベースで検出しマスク
 3. Open3D の ScalableTSDFVolume で深度フレームを統合
-4. 孤立クラスタ・縮退三角形を除去して出力
+4. 孤立クラスタ・縮退三角形を除去（クリーン処理）
+5. クリーン済みメッシュ頂点を高さで分割 → PCA で平面法線推定 → 凸包メッシュを生成して結合（傾斜床対応）
+6. 重力アライメント（`R_align`）適用後、X 軸 180° 回転で Isaac Sim 座標系に変換

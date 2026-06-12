@@ -48,8 +48,8 @@ MAX_GAUSSIANS: int = 300_000  # safety cap
 # --------------------------------------------------------------------------- #
 
 # TSDF volume parameters
-MESH_VOXEL_SIZE: float = 0.05          # voxel size [m]; smaller = finer mesh
-MESH_MAX_DEPTH: float = 8.0            # depth cutoff [m]; set to scene diagonal
+MESH_VOXEL_SIZE: float = 0.05  # voxel size [m]; smaller = finer mesh
+MESH_MAX_DEPTH: float = 8.0  # depth cutoff [m]; set to scene diagonal
 MESH_MIN_CLUSTER_TRIANGLES: int = 500  # remove isolated clusters below this size
 
 # --------------------------------------------------------------------------- #
@@ -58,10 +58,10 @@ MESH_MIN_CLUSTER_TRIANGLES: int = 500  # remove isolated clusters below this siz
 # Set each flag to True to exclude that surface from TSDF integration.
 # Prompts are passed to GroundingDINO; SAM2 refines the detected regions.
 
-MESH_MASK_FLOOR: bool = True     # indoor floor
-MESH_MASK_CEILING: bool = True   # indoor ceiling
-MESH_MASK_GROUND: bool = False   # outdoor ground / road
-MESH_MASK_SKY: bool = False      # outdoor sky
+MESH_MASK_FLOOR: bool = True  # indoor floor
+MESH_MASK_CEILING: bool = False  # indoor ceiling
+MESH_MASK_GROUND: bool = False  # outdoor ground / road
+MESH_MASK_SKY: bool = False  # outdoor sky
 
 MESH_FLOOR_PROMPTS: list[str] = ["floor", "carpet", "tile floor", "wooden floor", "rug"]
 MESH_CEILING_PROMPTS: list[str] = ["ceiling"]
@@ -71,3 +71,16 @@ MESH_SKY_PROMPTS: list[str] = ["sky"]
 # GroundingDINO thresholds for surface masking (can differ from dynamic-object masking)
 MESH_GDINO_BOX_THRESHOLD: float = 0.25
 MESH_GDINO_TEXT_THRESHOLD: float = 0.20
+
+# --------------------------------------------------------------------------- #
+# RANSAC plane filling
+# Replace excluded surface regions with fitted flat planes.
+# --------------------------------------------------------------------------- #
+MESH_FILL_PLANES: bool = True  # enable/disable plane filling
+MESH_PLANE_RANSAC_DISTANCE: float = 0.05  # inlier distance threshold [m]
+MESH_PLANE_RANSAC_ITERATIONS: int = 1000  # RANSAC iterations
+MESH_PLANE_MIN_POINTS: int = 500          # skip plane if fewer points remain
+MESH_PLANE_MAX_INPUT_POINTS: int = 50_000 # random subsample cap fed into RANSAC
+# Height percentile used to isolate floor/ceiling candidates from the CLEANED mesh.
+# Bottom MESH_PLANE_HEIGHT_PERCENTILE % of vertices → floor; top % → ceiling.
+MESH_PLANE_HEIGHT_PERCENTILE: float = 20.0
