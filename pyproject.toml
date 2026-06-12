@@ -16,6 +16,9 @@ dependencies = [
     "opencv-python>=4.9.0",
     # SfM (COLMAP CLI + pycolmap for result parsing)
     "pycolmap>=3.8.0",
+    # Mesh export
+    "open3d>=0.18.0",
+    "scipy>=1.11.0",
     # 3DGS
     "gsplat>=1.4.0",
     # CLI

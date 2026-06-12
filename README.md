@@ -58,7 +58,9 @@ output/
 │       └── gravity_rotation.json  # 重力アライメント回転行列（キャッシュ）
 ├── mesh/
 │   ├── tsdf_fusion.ply       # 生メッシュ
-│   └── tsdf_fusion_post.ply  # クリーニング済みメッシュ
+│   ├── tsdf_fusion_post.ply  # 壁・構造物メッシュ（Isaac Sim座標系）
+│   ├── floor.ply             # 床平面（IsaacSim座標系、衝突判定用）
+│   └── ceiling.ply           # 天井平面（IsaacSim座標系、衝突判定用）
 ├── pipeline.json        # ステップ完了フラグ（再開用）
 └── gaussian.ply         # 3DGS 出力
 ```

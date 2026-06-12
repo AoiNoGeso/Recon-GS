@@ -358,13 +358,10 @@ def _make_plane_mesh(
 def _fill_planes_from_mesh(
     mesh_clean: o3d.geometry.TriangleMesh,
     world_up: np.ndarray,
-) -> list[o3d.geometry.TriangleMesh]:
+) -> list[tuple[str, o3d.geometry.TriangleMesh]]:
     """Fit floor and ceiling planes using vertices from the cleaned mesh.
 
-    Splits vertices into bottom/top MESH_PLANE_HEIGHT_PERCENTILE % groups
-    along world_up, then fits a plane to each group via PCA.  PCA handles
-    tilted surfaces correctly.  Wall bases (at floor level) give a good
-    estimate even when the floor itself was masked from TSDF.
+    Returns a list of (label, mesh) tuples where label is "floor" or "ceiling".
     """
     verts = np.asarray(mesh_clean.vertices).copy()
     colors = (
@@ -389,13 +386,13 @@ def _fill_planes_from_mesh(
     if MESH_MASK_CEILING or MESH_MASK_SKY:
         candidates.append(("ceiling", verts[heights >= high_cut]))
 
-    meshes: list[o3d.geometry.TriangleMesh] = []
+    results: list[tuple[str, o3d.geometry.TriangleMesh]] = []
     for label, candidate_verts in candidates:
         m = _make_plane_mesh(candidate_verts, verts, colors, up, label)
         if m is not None:
-            meshes.append(m)
+            results.append((label, m))
 
-    return meshes
+    return results
 
 
 # --------------------------------------------------------------------------- #
@@ -637,34 +634,49 @@ def export_mesh(
     mesh_clean.compute_vertex_normals()
 
     # ---- Plane filling from cleaned (now aligned) mesh vertices ----
+    # Planes are kept separate for Isaac Sim collision geometry splitting.
+    plane_meshes_labeled: list[tuple[str, o3d.geometry.TriangleMesh]] = []
     if MESH_FILL_PLANES:
         # After R_align is applied, "up" is [0, -1, 0] (COLMAP: camera Y = down)
         world_up = np.array([0.0, -1.0, 0.0], dtype=np.float64)
 
         print("Building planes from cleaned mesh vertices …")
-        plane_meshes = _fill_planes_from_mesh(mesh_clean, world_up)
-        print(f"  {len(plane_meshes)} plane(s) built")
-        if plane_meshes:
-            mesh_clean = _merge_meshes(mesh_clean, plane_meshes)
-            del plane_meshes
+        plane_meshes_labeled = _fill_planes_from_mesh(mesh_clean, world_up)
+        print(f"  {len(plane_meshes_labeled)} plane(s) built")
 
     # ---- Isaac Sim convention: 180° rotation around X axis ----
-    # R_x180 = diag(1, -1, -1): x unchanged, y and z negated.
-    # Applied after all plane generation so the plane fitting is unaffected.
-    print("Applying X180 rotation for Isaac Sim …")
-    verts_final = np.asarray(mesh_clean.vertices).copy()
-    verts_final[:, 1] *= -1
-    verts_final[:, 2] *= -1
-    mesh_clean.vertices = o3d.utility.Vector3dVector(verts_final)
-    mesh_clean.compute_vertex_normals()
+    # Applied to each mesh independently so all share the same coordinate frame.
+    def _apply_x180(m: o3d.geometry.TriangleMesh) -> o3d.geometry.TriangleMesh:
+        v = np.asarray(m.vertices).copy()
+        v[:, 1] *= -1
+        v[:, 2] *= -1
+        m.vertices = o3d.utility.Vector3dVector(v)
+        m.compute_vertex_normals()
+        return m
 
+    print("Applying X180 rotation for Isaac Sim …")
+    mesh_clean = _apply_x180(mesh_clean)
+
+    # ---- Save main mesh (walls + structure, no planes) ----
     post_path = output_dir / "tsdf_fusion_post.ply"
     o3d.io.write_triangle_mesh(
         str(post_path), mesh_clean,
-        write_triangle_uvs=True,
-        write_vertex_colors=True,
-        write_vertex_normals=True,
+        write_triangle_uvs=True, write_vertex_colors=True, write_vertex_normals=True,
     )
-    n_tris = len(mesh_clean.triangles)
+    print(f"  Main mesh → {post_path}  ({len(mesh_clean.triangles):,} triangles)")
     del mesh_clean
-    print(f"  Final mesh → {post_path}  ({n_tris:,} triangles)")
+
+    # ---- Save each plane as a separate file ----
+    label_to_filename = {
+        "floor":   "floor.ply",
+        "ceiling": "ceiling.ply",
+    }
+    for label, pm in plane_meshes_labeled:
+        pm = _apply_x180(pm)
+        fname = label_to_filename.get(label, f"{label}.ply")
+        plane_path = output_dir / fname
+        o3d.io.write_triangle_mesh(
+            str(plane_path), pm,
+            write_triangle_uvs=True, write_vertex_colors=True, write_vertex_normals=True,
+        )
+        print(f"  {label} plane → {plane_path}  ({len(pm.triangles):,} triangles)")
