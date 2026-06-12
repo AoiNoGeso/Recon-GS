@@ -19,33 +19,32 @@ from __future__ import annotations
 from pathlib import Path
 
 import numpy as np
+import open3d as o3d
+import pycolmap
 import torch
+from gsplat import rasterization
+from plyfile import PlyData
 from torch import Tensor
 
-import pycolmap
-from plyfile import PlyData
-from gsplat import rasterization
-import open3d as o3d
-
-from recon_gs.align import load_or_compute_gravity_rotation, apply_to_c2w
+from recon_gs.align import apply_to_c2w, load_or_compute_gravity_rotation
 from recon_gs.config import (
-    MESH_VOXEL_SIZE,
-    MESH_MAX_DEPTH,
-    MESH_MIN_CLUSTER_TRIANGLES,
-    MESH_MASK_FLOOR,
-    MESH_MASK_CEILING,
-    MESH_MASK_GROUND,
-    MESH_MASK_SKY,
-    MESH_FLOOR_PROMPTS,
     MESH_CEILING_PROMPTS,
-    MESH_GROUND_PROMPTS,
-    MESH_SKY_PROMPTS,
+    MESH_FILL_PLANES,
+    MESH_FLOOR_PROMPTS,
     MESH_GDINO_BOX_THRESHOLD,
     MESH_GDINO_TEXT_THRESHOLD,
-    MESH_FILL_PLANES,
-    MESH_PLANE_MIN_POINTS,
-    MESH_PLANE_MAX_INPUT_POINTS,
+    MESH_GROUND_PROMPTS,
+    MESH_MASK_CEILING,
+    MESH_MASK_FLOOR,
+    MESH_MASK_GROUND,
+    MESH_MASK_SKY,
+    MESH_MAX_DEPTH,
+    MESH_MIN_CLUSTER_TRIANGLES,
     MESH_PLANE_HEIGHT_PERCENTILE,
+    MESH_PLANE_MAX_INPUT_POINTS,
+    MESH_PLANE_MIN_POINTS,
+    MESH_SKY_PROMPTS,
+    MESH_VOXEL_SIZE,
 )
 
 _GDINO_MODEL_ID = "IDEA-Research/grounding-dino-tiny"
@@ -55,6 +54,7 @@ _SAM2_MODEL_ID = "facebook/sam2-hiera-large"
 # --------------------------------------------------------------------------- #
 # PLY loading
 # --------------------------------------------------------------------------- #
+
 
 def _load_ply_gaussians(ply_path: Path, device: torch.device):
     """Load Gaussians from a .ply file exported by _export_ply().
@@ -98,6 +98,7 @@ def _load_ply_gaussians(ply_path: Path, device: torch.device):
 # Grounded-SAM2 surface masking
 # --------------------------------------------------------------------------- #
 
+
 def _build_surface_prompts() -> list[str]:
     """Collect active surface prompts from config flags."""
     prompts: list[str] = []
@@ -114,9 +115,9 @@ def _build_surface_prompts() -> list[str]:
 
 def _load_gsam2_models(device: torch.device):
     """Load GroundingDINO and SAM2 models."""
-    from transformers import AutoModelForZeroShotObjectDetection, AutoProcessor
     from sam2.build_sam import build_sam2_hf
     from sam2.sam2_image_predictor import SAM2ImagePredictor
+    from transformers import AutoModelForZeroShotObjectDetection, AutoProcessor
 
     gdino_processor = AutoProcessor.from_pretrained(_GDINO_MODEL_ID)
     gdino_model = (
@@ -191,6 +192,7 @@ def _surface_mask_gsam2(
 # Per-view rendering
 # --------------------------------------------------------------------------- #
 
+
 @torch.no_grad()
 def _render_view(
     means: Tensor,
@@ -230,7 +232,7 @@ def _render_view(
     # ---- Depth (z in camera space) ----
     w2c = torch.linalg.inv(c2w)
     means_cam = (w2c[:3, :3] @ means.T + w2c[:3, 3:]).T  # (N, 3)
-    z_vals = means_cam[:, 2].clamp(min=0.0)               # (N,)
+    z_vals = means_cam[:, 2].clamp(min=0.0)  # (N,)
 
     depth_render, _, _ = rasterization(
         means=means,
@@ -254,6 +256,7 @@ def _render_view(
 # Plane fitting
 # --------------------------------------------------------------------------- #
 
+
 def _pca_plane(
     points: np.ndarray,
     world_up: np.ndarray,
@@ -266,12 +269,15 @@ def _pca_plane(
     pts = points.astype(np.float64)
     centroid = pts.mean(axis=0)
     cov = (pts - centroid).T @ (pts - centroid) / len(pts)
-    _, eigvecs = np.linalg.eigh(cov)   # ascending eigenvalues; eigvecs[:,0] = min
+    _, eigvecs = np.linalg.eigh(cov)  # ascending eigenvalues; eigvecs[:,0] = min
     normal = eigvecs[:, 0]
     if normal @ world_up.astype(np.float64) < 0:
         normal = -normal
-    ref = np.array([1.0, 0.0, 0.0]) if abs(normal[0]) < 0.9 else np.array([0.0, 1.0, 0.0])
-    u_axis = np.cross(normal, ref); u_axis /= np.linalg.norm(u_axis)
+    ref = (
+        np.array([1.0, 0.0, 0.0]) if abs(normal[0]) < 0.9 else np.array([0.0, 1.0, 0.0])
+    )
+    u_axis = np.cross(normal, ref)
+    u_axis /= np.linalg.norm(u_axis)
     v_axis = np.cross(normal, u_axis)
     return centroid, normal, u_axis, v_axis
 
@@ -299,13 +305,17 @@ def _make_plane_mesh(
     from scipy.spatial import ConvexHull
 
     if len(candidate_verts) < MESH_PLANE_MIN_POINTS:
-        print(f"  [{label}] too few candidate vertices ({len(candidate_verts):,}), skipped")
+        print(
+            f"  [{label}] too few candidate vertices ({len(candidate_verts):,}), skipped"
+        )
         return None
 
     # Subsample candidates before PCA to bound cost
     if len(candidate_verts) > MESH_PLANE_MAX_INPUT_POINTS:
         rng = np.random.default_rng(0)
-        idx = rng.choice(len(candidate_verts), MESH_PLANE_MAX_INPUT_POINTS, replace=False)
+        idx = rng.choice(
+            len(candidate_verts), MESH_PLANE_MAX_INPUT_POINTS, replace=False
+        )
         sample = candidate_verts[idx]
     else:
         sample = candidate_verts
@@ -313,8 +323,10 @@ def _make_plane_mesh(
     centroid, normal, u_axis, v_axis = _pca_plane(sample, world_up)
 
     alignment = abs(float(normal @ world_up.astype(np.float64)))
-    print(f"  [{label}] PCA normal=({normal[0]:.2f},{normal[1]:.2f},{normal[2]:.2f})  "
-          f"alignment={alignment:.2f}")
+    print(
+        f"  [{label}] PCA normal=({normal[0]:.2f},{normal[1]:.2f},{normal[2]:.2f})  "
+        f"alignment={alignment:.2f}"
+    )
     if alignment < 0.7:
         print(f"  [{label}] plane too vertical (alignment={alignment:.2f}), skipped")
         return None
@@ -375,10 +387,12 @@ def _fill_planes_from_mesh(
     heights = verts @ up
 
     pct = MESH_PLANE_HEIGHT_PERCENTILE
-    low_cut  = float(np.percentile(heights, pct))
+    low_cut = float(np.percentile(heights, pct))
     high_cut = float(np.percentile(heights, 100.0 - pct))
-    print(f"  Mesh height range [{heights.min():.3f}, {heights.max():.3f}]  "
-          f"floor≤{low_cut:.3f}  ceiling≥{high_cut:.3f}")
+    print(
+        f"  Mesh height range [{heights.min():.3f}, {heights.max():.3f}]  "
+        f"floor≤{low_cut:.3f}  ceiling≥{high_cut:.3f}"
+    )
 
     candidates = []
     if MESH_MASK_FLOOR or MESH_MASK_GROUND:
@@ -399,6 +413,7 @@ def _fill_planes_from_mesh(
 # Mesh post-processing
 # --------------------------------------------------------------------------- #
 
+
 def _clean_mesh(mesh: o3d.geometry.TriangleMesh) -> o3d.geometry.TriangleMesh:
     """Remove small disconnected clusters and rebuild as an independent mesh.
 
@@ -413,8 +428,8 @@ def _clean_mesh(mesh: o3d.geometry.TriangleMesh) -> o3d.geometry.TriangleMesh:
 
     keep_mask = cluster_n_tris[tri_clusters] >= MESH_MIN_CLUSTER_TRIANGLES
 
-    all_tris = np.asarray(mesh.triangles)[keep_mask].copy()     # (K, 3)
-    all_verts = np.asarray(mesh.vertices).copy()                # (V, 3)
+    all_tris = np.asarray(mesh.triangles)[keep_mask].copy()  # (K, 3)
+    all_verts = np.asarray(mesh.vertices).copy()  # (V, 3)
     has_colors = mesh.has_vertex_colors()
     all_colors = np.asarray(mesh.vertex_colors).copy() if has_colors else None
 
@@ -481,6 +496,7 @@ def _merge_meshes(
 # Main entry point
 # --------------------------------------------------------------------------- #
 
+
 def export_mesh(
     colmap_dir: Path,
     frames_dir: Path,
@@ -493,7 +509,7 @@ def export_mesh(
         colmap_dir : directory containing sparse/0 COLMAP reconstruction
         frames_dir : directory with input RGB frames
         ply_path   : trained Gaussian .ply file
-        output_dir : where to write tsdf_fusion.ply and tsdf_fusion_post.ply
+        output_dir : where to write mesh files
     """
     from PIL import Image as PILImage
 
@@ -569,14 +585,21 @@ def export_mesh(
         )
 
         # Render RGB + depth from Gaussians
-        rgb, depth = _render_view(means, scales, quats, opacities, sh_coeffs, c2w, K, W, H)
+        rgb, depth = _render_view(
+            means, scales, quats, opacities, sh_coeffs, c2w, K, W, H
+        )
 
         # Surface mask via Grounded-SAM2
         depth_masked = depth.copy()
         if use_surface_mask:
             image_np = np.array(pil_img)
             surface_mask = _surface_mask_gsam2(
-                image_np, gdino_processor, gdino_model, sam2_predictor, prompt_str, device
+                image_np,
+                gdino_processor,
+                gdino_model,
+                sam2_predictor,
+                prompt_str,
+                device,
             )
             depth_masked[surface_mask] = 0.0
 
@@ -589,7 +612,8 @@ def export_mesh(
         o3d_color = o3d.geometry.Image(rgb_uint8)
         o3d_depth = o3d.geometry.Image(depth_uint16)
         rgbd = o3d.geometry.RGBDImage.create_from_color_and_depth(
-            o3d_color, o3d_depth,
+            o3d_color,
+            o3d_depth,
             depth_scale=1000.0,
             depth_trunc=MESH_MAX_DEPTH,
             convert_rgb_to_intensity=False,
@@ -610,9 +634,10 @@ def export_mesh(
     mesh = volume.extract_triangle_mesh()
     mesh.compute_vertex_normals()
 
-    raw_path = output_dir / "tsdf_fusion.ply"
+    raw_path = output_dir / "raw_mesh.ply"
     o3d.io.write_triangle_mesh(
-        str(raw_path), mesh,
+        str(raw_path),
+        mesh,
         write_triangle_uvs=True,
         write_vertex_colors=True,
         write_vertex_normals=True,
@@ -658,17 +683,20 @@ def export_mesh(
     mesh_clean = _apply_x180(mesh_clean)
 
     # ---- Save main mesh (walls + structure, no planes) ----
-    post_path = output_dir / "tsdf_fusion_post.ply"
+    post_path = output_dir / "wall.ply"
     o3d.io.write_triangle_mesh(
-        str(post_path), mesh_clean,
-        write_triangle_uvs=True, write_vertex_colors=True, write_vertex_normals=True,
+        str(post_path),
+        mesh_clean,
+        write_triangle_uvs=True,
+        write_vertex_colors=True,
+        write_vertex_normals=True,
     )
     print(f"  Main mesh → {post_path}  ({len(mesh_clean.triangles):,} triangles)")
     del mesh_clean
 
     # ---- Save each plane as a separate file ----
     label_to_filename = {
-        "floor":   "floor.ply",
+        "floor": "floor.ply",
         "ceiling": "ceiling.ply",
     }
     for label, pm in plane_meshes_labeled:
@@ -676,7 +704,10 @@ def export_mesh(
         fname = label_to_filename.get(label, f"{label}.ply")
         plane_path = output_dir / fname
         o3d.io.write_triangle_mesh(
-            str(plane_path), pm,
-            write_triangle_uvs=True, write_vertex_colors=True, write_vertex_normals=True,
+            str(plane_path),
+            pm,
+            write_triangle_uvs=True,
+            write_vertex_colors=True,
+            write_vertex_normals=True,
         )
         print(f"  {label} plane → {plane_path}  ({len(pm.triangles):,} triangles)")
