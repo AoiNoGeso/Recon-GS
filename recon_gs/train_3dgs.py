@@ -61,20 +61,17 @@ def _load_colmap_cameras(
         ).to(device)
         K_list.append(K)
 
-        # RGB image
+        # RGB image — stored as uint8 CPU array to avoid GPU OOM
         img_path = frames_dir / img.name
-        rgb = np.array(Image.open(img_path).convert("RGB"), dtype=np.float32) / 255.0
-        image_list.append(torch.tensor(rgb).to(device))
+        image_list.append(np.array(Image.open(img_path).convert("RGB"), dtype=np.uint8))
 
         # Mask (1 = dynamic / ignored, 0 = static / used)
         mask_path = masks_dir / img.name
         if mask_path.exists():
-            mask_np = np.array(Image.open(mask_path).convert("L"), dtype=np.float32) / 255.0
-            mask = torch.tensor(mask_np).to(device)
+            mask_list.append(np.array(Image.open(mask_path).convert("L"), dtype=np.uint8))
         else:
-            h, w = rgb.shape[:2]
-            mask = torch.zeros(h, w, device=device)
-        mask_list.append(mask)
+            h, w = image_list[-1].shape[:2]
+            mask_list.append(np.zeros((h, w), dtype=np.uint8))
 
     h, w = image_list[0].shape[:2]
     return c2w_list, K_list, image_list, mask_list, w, h
@@ -152,8 +149,8 @@ def train_3dgs(colmap_dir: Path, frames_dir: Path, masks_dir: Path, output_ply: 
         idx = step % n_views
         c2w = c2w_list[idx]
         K = K_list[idx]
-        gt = gt_images[idx]
-        mask = gt_masks[idx]
+        gt = torch.tensor(gt_images[idx], dtype=torch.float32, device=device) / 255.0
+        mask = torch.tensor(gt_masks[idx], dtype=torch.float32, device=device) / 255.0
 
         viewmat = torch.linalg.inv(c2w)[None]  # (1, 4, 4)
         quats_norm = quats / quats.norm(dim=-1, keepdim=True)
