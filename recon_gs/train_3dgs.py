@@ -22,16 +22,21 @@ def _load_colmap_cameras(
     frames_dir: Path,
     masks_dir: Path,
     device: torch.device,
-) -> tuple[list[Tensor], list[Tensor], list[Tensor], list[Tensor], int, int]:
-    """
-    Parse COLMAP sparse model and return per-image tensors needed by gsplat.
+) -> tuple[list[Tensor], list[Tensor], list[np.ndarray], list[np.ndarray], int, int]:
+    """Parse COLMAP sparse model and return per-image data needed by gsplat.
+
+    Images and masks are stored as uint8 numpy arrays on CPU to avoid VRAM
+    exhaustion on long videos.  They are converted to float32 GPU tensors
+    one frame at a time in the training loop.
+
     Returns (c2w_list, K_list, image_list, mask_list, width, height).
+      image_list : list of (H, W, 3) uint8 numpy arrays  [0, 255]
+      mask_list  : list of (H, W)    uint8 numpy arrays  [0, 255]
     """
     from PIL import Image
 
     model = pycolmap.Reconstruction(str(sparse_dir))
 
-    # Gravity alignment: rotate world so that Y points up
     R_align = torch.tensor(
         load_or_compute_gravity_rotation(sparse_dir), dtype=torch.float32, device=device
     )
@@ -42,7 +47,6 @@ def _load_colmap_cameras(
         img = model.images[image_id]
         cam = model.cameras[img.camera_id]
 
-        # World-to-camera rotation + translation (pycolmap >= 3.x API)
         cam_from_world = img.cam_from_world()
         R = torch.tensor(cam_from_world.rotation.matrix(), dtype=torch.float32, device=device)
         t = torch.tensor(cam_from_world.translation, dtype=torch.float32, device=device)
@@ -52,7 +56,6 @@ def _load_colmap_cameras(
         c2w = apply_to_c2w(torch.linalg.inv(w2c), R_align)
         c2w_list.append(c2w)
 
-        # Intrinsics
         fx = cam.focal_length_x if hasattr(cam, "focal_length_x") else cam.focal_length
         fy = cam.focal_length_y if hasattr(cam, "focal_length_y") else fx
         cx, cy = cam.principal_point_x, cam.principal_point_y
@@ -61,22 +64,19 @@ def _load_colmap_cameras(
         ).to(device)
         K_list.append(K)
 
-        # RGB image
+        # Store as uint8 CPU numpy to minimise memory (3× smaller than float32)
         img_path = frames_dir / img.name
-        rgb = np.array(Image.open(img_path).convert("RGB"), dtype=np.float32) / 255.0
-        image_list.append(torch.tensor(rgb).to(device))
+        image_list.append(np.array(Image.open(img_path).convert("RGB"), dtype=np.uint8))
 
-        # Mask (1 = dynamic / ignored, 0 = static / used)
         mask_path = masks_dir / img.name
         if mask_path.exists():
-            mask_np = np.array(Image.open(mask_path).convert("L"), dtype=np.float32) / 255.0
-            mask = torch.tensor(mask_np).to(device)
+            mask_list.append(np.array(Image.open(mask_path).convert("L"), dtype=np.uint8))
         else:
-            h, w = rgb.shape[:2]
-            mask = torch.zeros(h, w, device=device)
-        mask_list.append(mask)
+            h, w = image_list[-1].shape[:2]
+            mask_list.append(np.zeros((h, w), dtype=np.uint8))
 
     h, w = image_list[0].shape[:2]
+    print(f"  Loaded {len(c2w_list)} views into CPU RAM (images as uint8)")
     return c2w_list, K_list, image_list, mask_list, w, h
 
 
@@ -151,8 +151,10 @@ def train_3dgs(colmap_dir: Path, frames_dir: Path, masks_dir: Path, output_ply: 
         idx = step % n_views
         c2w = c2w_list[idx]
         K = K_list[idx]
-        gt = gt_images[idx]
-        mask = gt_masks[idx]
+
+        # Convert uint8 CPU numpy → float32 GPU tensor on-the-fly
+        gt   = torch.tensor(gt_images[idx], dtype=torch.float32, device=device) / 255.0
+        mask = torch.tensor(gt_masks[idx],  dtype=torch.float32, device=device) / 255.0
 
         viewmat = torch.linalg.inv(c2w)[None]  # (1, 4, 4)
         quats_norm = quats / quats.norm(dim=-1, keepdim=True)
