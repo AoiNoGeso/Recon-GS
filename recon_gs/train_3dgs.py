@@ -1,4 +1,4 @@
-"""Step 4: Train 3D Gaussian Splatting with gsplat and export output.ply."""
+"""Step 4: Train 2D Gaussian Splatting with gsplat and export output.ply."""
 
 from pathlib import Path
 
@@ -7,7 +7,7 @@ import numpy as np
 from torch import Tensor
 
 import pycolmap
-from gsplat import rasterization
+from gsplat import rasterization_2dgs
 
 from recon_gs.config import TRAIN_ITERATIONS
 from recon_gs.align import load_or_compute_gravity_rotation, apply_to_c2w
@@ -92,8 +92,9 @@ def _init_gaussians_from_sparse(sparse_dir: Path, device: torch.device):
     means = (R_align @ torch.tensor(points, device=device).T).T
     n = len(means)
 
-    # Covariance (log-scale + quaternion)
+    # 2DGS: 3 scale dims but third (disk normal direction) initialized very thin
     scales = torch.full((n, 3), -4.0, device=device)  # exp(-4) ≈ 0.018 m
+    scales[:, 2] = -8.0  # disk thickness: exp(-8) ≈ 3e-4 m
     quats = torch.zeros((n, 4), device=device)
     quats[:, 0] = 1.0  # identity quaternion [w, x, y, z]
 
@@ -157,7 +158,7 @@ def train_3dgs(colmap_dir: Path, frames_dir: Path, masks_dir: Path, output_ply: 
         viewmat = torch.linalg.inv(c2w)[None]  # (1, 4, 4)
         quats_norm = quats / quats.norm(dim=-1, keepdim=True)
 
-        renders, alphas, _ = rasterization(
+        renders, alphas, _, _, distloss_val, _, _ = rasterization_2dgs(
             means=means,
             quats=quats_norm,
             scales=torch.exp(scales),
@@ -167,13 +168,19 @@ def train_3dgs(colmap_dir: Path, frames_dir: Path, masks_dir: Path, output_ply: 
             Ks=K[None],
             width=W,
             height=H,
+            near_plane=0.01,
+            far_plane=200.0,
             sh_degree=0,
+            render_mode="RGB+D",
+            distloss=True,
         )
 
-        rendered = renders[0]  # (H, W, 3)
+        rendered = renders[0, ..., :3]  # (H, W, 3); RGB+D gives 4 channels
 
         valid = (1.0 - mask).unsqueeze(-1)
         loss = torch.abs(rendered * valid - gt * valid).mean()
+        if distloss_val is not None:
+            loss = loss + 0.001 * distloss_val.mean()
 
         optimizer.zero_grad()
         loss.backward()

@@ -22,7 +22,7 @@ import numpy as np
 import open3d as o3d
 import pycolmap
 import torch
-from gsplat import rasterization
+from gsplat import rasterization_2dgs
 from plyfile import PlyData
 from torch import Tensor
 
@@ -213,8 +213,7 @@ def _render_view(
     """
     viewmat = torch.linalg.inv(c2w)[None]  # (1, 4, 4)
 
-    # ---- RGB ----
-    rgb_render, _, _ = rasterization(
+    renders, _, _, _, _, surf_depths, _ = rasterization_2dgs(
         means=means,
         quats=quats,
         scales=scales,
@@ -224,30 +223,14 @@ def _render_view(
         Ks=K[None],
         width=W,
         height=H,
+        near_plane=0.01,
+        far_plane=200.0,
         sh_degree=0,
         packed=False,
     )
-    rgb = rgb_render[0].clamp(0, 1).cpu().numpy()  # (H, W, 3)
 
-    # ---- Depth (z in camera space) ----
-    w2c = torch.linalg.inv(c2w)
-    means_cam = (w2c[:3, :3] @ means.T + w2c[:3, 3:]).T  # (N, 3)
-    z_vals = means_cam[:, 2].clamp(min=0.0)  # (N,)
-
-    depth_render, _, _ = rasterization(
-        means=means,
-        quats=quats,
-        scales=scales,
-        opacities=opacities,
-        colors=z_vals.view(-1, 1),
-        viewmats=viewmat,
-        Ks=K[None],
-        width=W,
-        height=H,
-        sh_degree=None,
-        packed=False,
-    )
-    depth = depth_render[0, ..., 0].cpu().numpy()  # (H, W)
+    rgb = renders[0].clamp(0, 1).cpu().numpy()  # (H, W, 3)
+    depth = surf_depths[0, ..., 0].cpu().numpy()  # (H, W)
 
     return rgb, depth
 
